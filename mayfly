@@ -75,14 +75,15 @@ publish() {
   TMPD="$(mktemp -d)"
   trap 'rm -rf "${TMPD:-}"' EXIT
 
-  local TREE_ENTRIES="" DESTS="" path base dest blob
+  local TREE_ENTRIES="" BASENAMES="" path base dest blob
   local DESTLIST=()
   for path in "$@"; do
     [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
     base="$(basename "$path")"
     if [ -n "$PREFIX" ]; then dest="$PREFIX/$base"; else dest="$base"; fi
-    case " $DESTS " in *" $dest "*) echo "$PROG: duplicate destination: $dest" >&2; exit 1;; esac
-    DESTS="$DESTS $dest"; DESTLIST+=("$dest")
+    # archive:false keys the artifact preview by basename, so basenames must be unique.
+    case " $BASENAMES " in *" $base "*) echo "$PROG: duplicate file name: $base" >&2; exit 1;; esac
+    BASENAMES="$BASENAMES $base"; DESTLIST+=("$dest")
 
     { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
     blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
@@ -91,31 +92,37 @@ publish() {
   done
 
   printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$TREE_ENTRIES" > "$TMPD/tree.json"
-  local NEW_TREE NEW_COMMIT
+  local NEW_TREE NEW_COMMIT RUN_ID="" i ART_LIST=""
   NEW_TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/tree.json" -q .sha)"
-  NEW_COMMIT="$(gh api -X POST "repos/$REPO/git/commits" \
-    -f message="$MESSAGE" -f tree="$NEW_TREE" -f "parents[]=$HEAD_SHA" -q .sha)"
-  gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$NEW_COMMIT" >/dev/null
-  echo "$PROG: committed ${#DESTLIST[@]} file(s) to $REPO@$BRANCH ($NEW_COMMIT)" >&2
 
-  local RUN_ID="" i
-  echo -n "$PROG: waiting for workflow run" >&2
-  for i in $(seq 1 40); do
-    RUN_ID="$(gh api "repos/$REPO/actions/runs?head_sha=$NEW_COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
-    [ -n "$RUN_ID" ] && break
-    echo -n "." >&2; sleep 3
-  done
-  echo >&2
-  [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
-  gh run watch "$RUN_ID" -R "$REPO" --exit-status >/dev/null 2>&1 || \
-    echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
+  if [ "$NEW_TREE" = "$BASE_TREE" ]; then
+    # No diff: an empty commit wouldn't change the tree, and the workflow's
+    # path filter wouldn't fire anyway. Skip it and return null URLs.
+    echo "$PROG: no changes to publish on $BRANCH (already up to date)" >&2
+  else
+    NEW_COMMIT="$(gh api -X POST "repos/$REPO/git/commits" \
+      -f message="$MESSAGE" -f tree="$NEW_TREE" -f "parents[]=$HEAD_SHA" -q .sha)"
+    gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$NEW_COMMIT" >/dev/null
+    echo "$PROG: committed ${#DESTLIST[@]} file(s) to $REPO@$BRANCH ($NEW_COMMIT)" >&2
 
-  local ART_LIST; ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    echo -n "$PROG: waiting for workflow run" >&2
+    for i in $(seq 1 40); do
+      RUN_ID="$(gh api "repos/$REPO/actions/runs?head_sha=$NEW_COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
+      [ -n "$RUN_ID" ] && break
+      echo -n "." >&2; sleep 3
+    done
+    echo >&2
+    [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
+    gh run watch "$RUN_ID" -R "$REPO" --exit-status >/dev/null 2>&1 || \
+      echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
 
-  local FILES_JSON="" enc id url urljson entry
+    ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+  fi
+
+  local FILES_JSON="" id url urljson entry
   for dest in "${DESTLIST[@]}"; do
-    enc="$(printf '%s' "$dest" | tr '/' '_')"
-    id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$enc" '$1==n{print $2; exit}')"
+    base="$(basename "$dest")"
+    id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$base" '$1==n{print $2; exit}')"
     if [ -n "$id" ]; then
       url="https://github.com/$REPO/actions/runs/$RUN_ID/artifacts/$id"
       urljson="\"$(json_escape "$url")\""

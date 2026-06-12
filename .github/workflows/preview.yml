@@ -33,6 +33,10 @@ jobs:
           else
             CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
           fi
+          # Keep only files that still exist (ignore deletions).
+          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
+          done)
           FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "changed: $FILES"
