@@ -31,6 +31,31 @@ part of a codebase you merge.
   *private* (Settings → Pages), so kept previews are restricted to people with
   repo access. On non-Enterprise accounts, Pages is always public.
 
+## Setup (create your own from this template)
+
+mayfly is a **template repository**. To run your own:
+
+1. **Create a repo from the template.** On GitHub: **Use this template → Create a
+   new repository**. Or with the CLI:
+   ```bash
+   gh repo create my-previews --template toiroakr/mayfly --private
+   ```
+   For access-controlled previews, make it **private** (or **internal**) inside
+   your **GitHub Enterprise Cloud** org.
+
+2. **Enable GitHub Pages with Actions as the source.** Settings → Pages → Build
+   and deployment → Source: **GitHub Actions** (`pages.yml` publishes `docs/`). Or:
+   ```bash
+   gh api -X POST repos/<owner>/my-previews/pages -f build_type=workflow
+   ```
+
+3. **(Enterprise) Restrict Pages visibility.** Settings → Pages → Visibility →
+   **Private**, so kept previews are limited to people with repo access. On
+   non-Enterprise accounts, Pages is always public.
+
+4. **Point the CLI at it.** Run `mayfly` from inside the clone, or set
+   `export MAYFLY_REPO=<owner>/my-previews`.
+
 ## CLI
 
 Put `mayfly` on your `PATH`:
