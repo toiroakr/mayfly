@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# mayfly — push HTML to a branch and get back artifact preview URLs.
+#
+#   mayfly [push] -b <branch> -f <file> [-f <file> ...]   # push & print JSON
+#   mayfly delete -b <branch>                             # delete a branch
+#
+# stdout is JSON only; progress goes to stderr (so `mayfly ... | jq` works).
+#
+set -euo pipefail
+
+PROG="mayfly"
+
+usage() {
+  cat <<EOF
+Usage:
+  $PROG [push] -b <branch> -f <file> [-f <file> ...] [options]
+  $PROG delete -b <branch> [options]
+
+Commands:
+  push     Push the given files to <branch> in one commit and print, as JSON,
+           the branch URL and a per-file artifact preview URL. (default)
+  delete   Delete <branch> from the repo.
+
+Options:
+  -b, --branch <name>   Target branch (required).
+  -f, --file <path>     Local file to push (repeatable, push only).
+  -m, --message <msg>   Commit message (push only).
+  -r, --repo <o/n>      Target repo "owner/name".
+  -h, --help            Show this help.
+
+Repo resolution: --repo > \$MAYFLY_REPO > the repo of the current directory
+(via 'gh repo view'). Run inside your fork's clone, or set MAYFLY_REPO.
+EOF
+}
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+resolve_repo() {
+  local r="${REPO_ARG:-${MAYFLY_REPO:-}}"
+  [ -z "$r" ] && r="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+  [ -n "$r" ] || { echo "$PROG: cannot determine repo; set MAYFLY_REPO or use --repo" >&2; exit 1; }
+  printf '%s' "$r"
+}
+
+# Ensure a branch exists, creating it from the default branch if needed.
+# Prints the branch head commit SHA.
+ensure_branch() {
+  local repo="$1" branch="$2" head
+  if head="$(gh api "repos/$repo/git/ref/heads/$branch" -q .object.sha 2>/dev/null)"; then
+    printf '%s' "$head"
+    return
+  fi
+  local def base
+  def="$(gh api "repos/$repo" -q .default_branch)"
+  base="$(gh api "repos/$repo/git/ref/heads/$def" -q .object.sha)"
+  gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
+  echo "$PROG: created branch '$branch'" >&2
+  printf '%s' "$base"
+}
+
+cmd_push() {
+  local BRANCH="" MESSAGE="" ; FILES=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -b|--branch)  BRANCH="$2"; shift 2;;
+      -f|--file)    FILES+=("$2"); shift 2;;
+      -m|--message) MESSAGE="$2"; shift 2;;
+      -r|--repo)    REPO_ARG="$2"; shift 2;;
+      -h|--help)    usage; exit 0;;
+      *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
+    esac
+  done
+  [ -n "$BRANCH" ] || { echo "$PROG: --branch is required" >&2; exit 1; }
+  [ "${#FILES[@]}" -gt 0 ] || { echo "$PROG: at least one --file is required" >&2; exit 1; }
+
+  local REPO; REPO="$(resolve_repo)"
+  : "${MESSAGE:=mayfly: update ${#FILES[@]} file(s)}"
+
+  local HEAD_SHA BASE_TREE
+  HEAD_SHA="$(ensure_branch "$REPO" "$BRANCH")"
+  BASE_TREE="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" -q .tree.sha)"
+
+  local TMPD; TMPD="$(mktemp -d)"
+  trap 'rm -rf "$TMPD"' EXIT
+
+  # Build tree entries; stream blob bodies via a file to dodge argv limits.
+  local TREE_ENTRIES="" DESTS=""
+  local path dest blob
+  for path in "${FILES[@]}"; do
+    [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
+    dest="$(basename "$path")"
+    case " $DESTS " in *" $dest "*) echo "$PROG: duplicate file name: $dest" >&2; exit 1;; esac
+    DESTS="$DESTS $dest"
+
+    { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
+    blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
+    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$dest\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
+    echo "$PROG: staged $dest" >&2
+  done
+
+  printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$TREE_ENTRIES" > "$TMPD/tree.json"
+  local NEW_TREE NEW_COMMIT
+  NEW_TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/tree.json" -q .sha)"
+  NEW_COMMIT="$(gh api -X POST "repos/$REPO/git/commits" \
+    -f message="$MESSAGE" -f tree="$NEW_TREE" -f "parents[]=$HEAD_SHA" -q .sha)"
+  gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$NEW_COMMIT" >/dev/null
+  echo "$PROG: pushed ${#FILES[@]} file(s) to $REPO@$BRANCH ($NEW_COMMIT)" >&2
+
+  # Find and wait for the workflow run triggered by this commit.
+  local RUN_ID="" i
+  echo -n "$PROG: waiting for workflow run" >&2
+  for i in $(seq 1 40); do
+    RUN_ID="$(gh api "repos/$REPO/actions/runs?head_sha=$NEW_COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
+    [ -n "$RUN_ID" ] && break
+    echo -n "." >&2; sleep 3
+  done
+  echo >&2
+  [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
+  gh run watch "$RUN_ID" -R "$REPO" --exit-status >/dev/null 2>&1 || \
+    echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
+
+  # Map each file to its artifact URL via the run's artifact list.
+  local ART_LIST; ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+
+  local FILES_JSON="" enc id url urljson entry
+  for path in "${FILES[@]}"; do
+    dest="$(basename "$path")"
+    enc="$(printf '%s' "$dest" | tr '/' '_')"
+    id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$enc" '$1==n{print $2; exit}')"
+    if [ -n "$id" ]; then
+      url="https://github.com/$REPO/actions/runs/$RUN_ID/artifacts/$id"
+      urljson="\"$(json_escape "$url")\""
+    else
+      urljson="null"
+    fi
+    entry="    { \"name\": \"$(json_escape "$dest")\", \"url\": $urljson }"
+    FILES_JSON="${FILES_JSON:+$FILES_JSON,
+}$entry"
+  done
+
+  cat <<EOF
+{
+  "branch": { "name": "$(json_escape "$BRANCH")", "url": "$(json_escape "https://github.com/$REPO/tree/$BRANCH")" },
+  "files": [
+$FILES_JSON
+  ]
+}
+EOF
+}
+
+cmd_delete() {
+  local BRANCH=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -b|--branch) BRANCH="$2"; shift 2;;
+      -r|--repo)   REPO_ARG="$2"; shift 2;;
+      -h|--help)   usage; exit 0;;
+      *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
+    esac
+  done
+  [ -n "$BRANCH" ] || { echo "$PROG: --branch is required" >&2; exit 1; }
+
+  local REPO; REPO="$(resolve_repo)"
+  local DEF; DEF="$(gh api "repos/$REPO" -q .default_branch)"
+  [ "$BRANCH" != "$DEF" ] || { echo "$PROG: refusing to delete the default branch '$DEF'" >&2; exit 1; }
+
+  gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1 || {
+    echo "$PROG: branch '$BRANCH' does not exist" >&2; exit 1; }
+  gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" >/dev/null
+  echo "$PROG: deleted branch '$BRANCH' from $REPO" >&2
+
+  cat <<EOF
+{
+  "branch": { "name": "$(json_escape "$BRANCH")", "deleted": true }
+}
+EOF
+}
+
+case "${1:-}" in
+  push)        shift; cmd_push "$@";;
+  delete|rm)   shift; cmd_delete "$@";;
+  -h|--help|"") usage; exit 0;;
+  -*)          cmd_push "$@";;
+  *)           echo "$PROG: unknown command: $1" >&2; usage; exit 1;;
+esac
