@@ -1,12 +1,12 @@
 name: Cleanup stale branches
 
-# Delete branches with no commits for 90 days.
-# Matched to the Actions artifact default retention (90 days), so this
-# cleans up the "empty shell" branches left after their artifacts expire.
+# Delete throwaway preview/* branches with no commits for 90 days.
+# Matched to the Actions artifact default retention (90 days). Only preview/*
+# branches are touched, so hand-made branches (including keep/* PRs) are safe.
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 毎日 00:00 UTC
+    - cron: '0 0 * * *' # daily 00:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -18,16 +18,15 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       STALE_DAYS: '90'
     steps:
-      - name: Delete branches with no commits in STALE_DAYS
+      - name: Delete stale preview/* branches
         run: |
           set -euo pipefail
           CUTOFF=$(date -u -d "$STALE_DAYS days ago" +%s)
 
           gh api "repos/$REPO/branches" --paginate -q '.[].name' | while IFS= read -r b; do
-            [ "$b" = "$DEFAULT_BRANCH" ] && continue
+            case "$b" in preview/*) ;; *) continue;; esac
             DATE=$(gh api "repos/$REPO/commits/$b" -q '.commit.committer.date')
             TS=$(date -u -d "$DATE" +%s)
             if [ "$TS" -lt "$CUTOFF" ]; then

@@ -1,41 +1,50 @@
 #!/usr/bin/env bash
 #
-# mayfly — publish HTML to a branch and get back artifact preview URLs.
+# mayfly — ephemeral HTML previews via GitHub Actions artifacts.
 #
-#   mayfly push   -b <branch> -f <file> [-f <file> ...]   # throwaway preview
-#   mayfly keep   -f <file> [-f <file> ...] [-p <dir>]    # persist on default branch
-#   mayfly delete -b <branch>                             # delete a branch
+#   mayfly push   [-b <branch>] -f <file> [-f <file> ...] [--open]  # throwaway preview
+#   mayfly keep   -p <path> -f <file> [-b <branch>] [--open]        # promote: open a PR
+#   mayfly list                                                     # list live previews
+#   mayfly delete (-b <branch> ... | --all-previews)                # delete branches
+#   mayfly completion <bash|zsh>                                    # shell completion
 #
 # stdout is JSON only; progress goes to stderr (so `mayfly ... | jq` works).
 #
 set -euo pipefail
 
 PROG="mayfly"
+PREVIEW_PREFIX="preview/"   # auto-generated throwaway branches
+DOCS_DIR="docs"             # keep target / GitHub Pages publish root
 
 usage() {
   cat <<EOF
 Usage:
-  $PROG push   -b <branch> -f <file> [-f <file> ...] [options]
-  $PROG keep   -f <file> [-f <file> ...] [-p <dir>] [options]
-  $PROG delete -b <branch> [options]
+  $PROG push   [-b <branch>] -f <file> [-f <file> ...] [--open]
+  $PROG keep   -p <path> -f <file> [-b <branch>] [--open]
+  $PROG list
+  $PROG delete (-b <branch> [-b <branch> ...] | --all-previews)
+  $PROG completion <bash|zsh>
 
 Commands:
-  push     Publish files to a throwaway <branch> (auto-deleted after 90 days)
-           and print the per-file artifact preview URLs as JSON. (default)
-  keep     Commit files to the default branch, so they persist like a design
-           doc instead of expiring. Optionally under a -p <dir> prefix.
-  delete   Delete <branch> from the repo.
+  push     Publish files to a throwaway branch (auto 'preview/<ts>-<rnd>' if -b
+           is omitted) and print per-file artifact preview URLs as JSON.
+  keep     Promote a file to the default branch by opening a PR that places it
+           at ${DOCS_DIR}/<path> (served by GitHub Pages once merged). Source is a
+           local file (-f), or a file on a preview branch (-b <branch> -f <name>).
+  list     List live preview/* branches with their latest run.
+  delete   Delete one or more branches, or every preview/* branch.
 
 Options:
-  -b, --branch <name>   Target branch (push/delete).
-  -f, --file <path>     Local file to publish (repeatable).
-  -p, --prefix <dir>    Destination directory in the repo (keep; default: root).
-  -m, --message <msg>   Commit message.
+  -b, --branch <name>   Branch (push: target; keep: source preview branch; delete: target).
+  -f, --file <path>     File (repeatable for push).
+  -p, --path <path>     Destination path under ${DOCS_DIR}/ (keep; = the Pages URL path).
+  -m, --message <msg>   Commit / PR message.
   -r, --repo <o/n>      Target repo "owner/name".
+      --open            Open the resulting URL in your browser.
+      --all-previews    (delete) remove every ${PREVIEW_PREFIX}* branch.
   -h, --help            Show this help.
 
-Repo resolution: --repo > \$MAYFLY_REPO > the repo of the current directory
-(via 'gh repo view'). Run inside your clone, or set MAYFLY_REPO.
+Repo: --repo > \$MAYFLY_REPO > the current directory's repo (gh repo view).
 EOF
 }
 
@@ -48,8 +57,16 @@ resolve_repo() {
   printf '%s' "$r"
 }
 
-# Ensure a branch exists, creating it from the default branch if needed.
-# Prints the branch head commit SHA.
+open_url() {
+  [ -n "${1:-}" ] || return 0
+  case "$(uname)" in
+    Darwin) open "$1" >/dev/null 2>&1 || true;;
+    *)      xdg-open "$1" >/dev/null 2>&1 || true;;
+  esac
+}
+
+gen_branch() { printf '%s%s-%s' "$PREVIEW_PREFIX" "$(date +%Y%m%d-%H%M%S)" "$RANDOM"; }
+
 ensure_branch() {
   local repo="$1" branch="$2" head def base
   if head="$(gh api "repos/$repo/git/ref/heads/$branch" -q .object.sha 2>/dev/null)"; then
@@ -62,33 +79,30 @@ ensure_branch() {
   printf '%s' "$base"
 }
 
-# publish <repo> <branch> <message> <prefix> <file>...
-# Commits all files in one commit, waits for the preview run, prints JSON.
+FIRST_URL=""
+
+# publish <repo> <branch> <message> <file>...  (files committed at basename, root)
 publish() {
-  local REPO="$1" BRANCH="$2" MESSAGE="$3" PREFIX="$4"; shift 4
-  PREFIX="${PREFIX%/}"
+  local REPO="$1" BRANCH="$2" MESSAGE="$3"; shift 3
+  FIRST_URL=""
 
   local HEAD_SHA BASE_TREE
   HEAD_SHA="$(ensure_branch "$REPO" "$BRANCH")"
   BASE_TREE="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" -q .tree.sha)"
 
-  TMPD="$(mktemp -d)"
-  trap 'rm -rf "${TMPD:-}"' EXIT
+  TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
 
-  local TREE_ENTRIES="" BASENAMES="" path base dest blob
+  local TREE_ENTRIES="" BASENAMES="" path base blob
   local DESTLIST=()
   for path in "$@"; do
     [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
     base="$(basename "$path")"
-    if [ -n "$PREFIX" ]; then dest="$PREFIX/$base"; else dest="$base"; fi
-    # archive:false keys the artifact preview by basename, so basenames must be unique.
     case " $BASENAMES " in *" $base "*) echo "$PROG: duplicate file name: $base" >&2; exit 1;; esac
-    BASENAMES="$BASENAMES $base"; DESTLIST+=("$dest")
-
+    BASENAMES="$BASENAMES $base"; DESTLIST+=("$base")
     { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
     blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
-    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$dest\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
-    echo "$PROG: staged $dest" >&2
+    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$base\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
+    echo "$PROG: staged $base" >&2
   done
 
   printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$TREE_ENTRIES" > "$TMPD/tree.json"
@@ -96,8 +110,6 @@ publish() {
   NEW_TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/tree.json" -q .sha)"
 
   if [ "$NEW_TREE" = "$BASE_TREE" ]; then
-    # No diff: an empty commit wouldn't change the tree, and the workflow's
-    # path filter wouldn't fire anyway. Skip it and return null URLs.
     echo "$PROG: no changes to publish on $BRANCH (already up to date)" >&2
   else
     NEW_COMMIT="$(gh api -X POST "repos/$REPO/git/commits" \
@@ -115,16 +127,15 @@ publish() {
     [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
     gh run watch "$RUN_ID" -R "$REPO" --exit-status >/dev/null 2>&1 || \
       echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
-
     ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
   fi
 
-  local FILES_JSON="" id url urljson entry
+  local FILES_JSON="" dest id url urljson entry
   for dest in "${DESTLIST[@]}"; do
-    base="$(basename "$dest")"
-    id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$base" '$1==n{print $2; exit}')"
+    id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$dest" '$1==n{print $2; exit}')"
     if [ -n "$id" ]; then
       url="https://github.com/$REPO/actions/runs/$RUN_ID/artifacts/$id"
+      [ -z "$FIRST_URL" ] && FIRST_URL="$url"
       urljson="\"$(json_escape "$url")\""
     else
       urljson="null"
@@ -145,72 +156,205 @@ EOF
 }
 
 cmd_push() {
-  local BRANCH="" MESSAGE=""; FILES=()
+  local BRANCH="" MESSAGE="" OPEN=0; FILES=()
   while [ $# -gt 0 ]; do
     case "$1" in
       -b|--branch)  BRANCH="$2"; shift 2;;
       -f|--file)    FILES+=("$2"); shift 2;;
       -m|--message) MESSAGE="$2"; shift 2;;
       -r|--repo)    REPO_ARG="$2"; shift 2;;
+      --open)       OPEN=1; shift;;
       -h|--help)    usage; exit 0;;
       *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
     esac
   done
-  [ -n "$BRANCH" ] || { echo "$PROG: --branch is required" >&2; exit 1; }
   [ "${#FILES[@]}" -gt 0 ] || { echo "$PROG: at least one --file is required" >&2; exit 1; }
   local REPO; REPO="$(resolve_repo)"
+  [ -n "$BRANCH" ] || BRANCH="$(gen_branch)"
   : "${MESSAGE:=mayfly: preview ${#FILES[@]} file(s)}"
-  publish "$REPO" "$BRANCH" "$MESSAGE" "" "${FILES[@]}"
+  publish "$REPO" "$BRANCH" "$MESSAGE" "${FILES[@]}"
+  [ "$OPEN" -eq 1 ] && open_url "$FIRST_URL"
+  return 0
 }
 
 cmd_keep() {
-  local PREFIX="" MESSAGE=""; FILES=()
+  local PATHARG="" FILE="" SRC_BRANCH="" MESSAGE="" OPEN=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      -f|--file)    FILES+=("$2"); shift 2;;
-      -p|--prefix)  PREFIX="$2"; shift 2;;
+      -p|--path)    PATHARG="$2"; shift 2;;
+      -f|--file)    FILE="$2"; shift 2;;
+      -b|--branch)  SRC_BRANCH="$2"; shift 2;;
       -m|--message) MESSAGE="$2"; shift 2;;
       -r|--repo)    REPO_ARG="$2"; shift 2;;
+      --open)       OPEN=1; shift;;
       -h|--help)    usage; exit 0;;
       *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
     esac
   done
-  [ "${#FILES[@]}" -gt 0 ] || { echo "$PROG: at least one --file is required" >&2; exit 1; }
+  [ -n "$PATHARG" ] || { echo "$PROG: --path is required" >&2; exit 1; }
+  [ -n "$FILE" ]    || { echo "$PROG: --file is required" >&2; exit 1; }
   local REPO; REPO="$(resolve_repo)"
   local DEF; DEF="$(gh api "repos/$REPO" -q .default_branch)"
-  : "${MESSAGE:=mayfly: keep ${#FILES[@]} file(s)}"
-  publish "$REPO" "$DEF" "$MESSAGE" "$PREFIX" "${FILES[@]}"
+  : "${MESSAGE:=keep: $PATHARG}"
+
+  # Resolve source content as base64 (local file, or a file on a preview branch).
+  TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
+  if [ -n "$SRC_BRANCH" ]; then
+    gh api "repos/$REPO/contents/$FILE?ref=$SRC_BRANCH" -q .content | tr -d '\n' > "$TMPD/b64" \
+      || { echo "$PROG: cannot read $FILE on $SRC_BRANCH" >&2; exit 1; }
+  else
+    [ -f "$FILE" ] || { echo "$PROG: file not found: $FILE" >&2; exit 1; }
+    base64 < "$FILE" | tr -d '\n' > "$TMPD/b64"
+  fi
+
+  local DEST="$DOCS_DIR/$PATHARG"
+  local KEEP_BRANCH; KEEP_BRANCH="keep/$(date +%Y%m%d-%H%M%S)-$RANDOM"
+  local BASE_SHA; BASE_SHA="$(gh api "repos/$REPO/git/ref/heads/$DEF" -q .object.sha)"
+  gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$KEEP_BRANCH" -f sha="$BASE_SHA" >/dev/null
+  echo "$PROG: created keep branch '$KEEP_BRANCH'" >&2
+
+  # Place the file at docs/<path> on the keep branch (update if it already exists).
+  local EXIST_SHA; EXIST_SHA="$(gh api "repos/$REPO/contents/$DEST?ref=$KEEP_BRANCH" -q .sha 2>/dev/null || true)"
+  {
+    printf '{"message":"%s","branch":"%s","content":"' "$(json_escape "$MESSAGE")" "$KEEP_BRANCH"
+    cat "$TMPD/b64"
+    printf '"'
+    [ -n "$EXIST_SHA" ] && printf ',"sha":"%s"' "$EXIST_SHA"
+    printf '}'
+  } > "$TMPD/put.json"
+  gh api -X PUT "repos/$REPO/contents/$DEST" --input "$TMPD/put.json" >/dev/null
+  echo "$PROG: placed $DEST on $KEEP_BRANCH" >&2
+
+  # Open a PR into the default branch.
+  local PR_URL PR_NUM
+  PR_URL="$(gh api -X POST "repos/$REPO/pulls" \
+    -f title="$MESSAGE" -f head="$KEEP_BRANCH" -f base="$DEF" \
+    -f body="Promote \`$DEST\` to keep it (published via GitHub Pages on merge)." \
+    -q .html_url)"
+  PR_NUM="$(gh api "repos/$REPO/pulls?head=$(printf '%s' "$REPO" | cut -d/ -f1):$KEEP_BRANCH&state=open" -q '.[0].number // empty')"
+  echo "$PROG: opened PR $PR_URL" >&2
+
+  cat <<EOF
+{
+  "pr": { "url": "$(json_escape "$PR_URL")", "number": ${PR_NUM:-null} },
+  "path": "$(json_escape "$DEST")",
+  "pages_path": "$(json_escape "$PATHARG")",
+  "branch": { "name": "$(json_escape "$KEEP_BRANCH")", "url": "$(json_escape "https://github.com/$REPO/tree/$KEEP_BRANCH")" }
+}
+EOF
+  [ "$OPEN" -eq 1 ] && open_url "$PR_URL"
+  return 0
 }
 
-cmd_delete() {
-  local BRANCH=""
+cmd_list() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      -b|--branch) BRANCH="$2"; shift 2;;
-      -r|--repo)   REPO_ARG="$2"; shift 2;;
-      -h|--help)   usage; exit 0;;
+      -r|--repo) REPO_ARG="$2"; shift 2;;
+      -h|--help) usage; exit 0;;
       *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
     esac
   done
-  [ -n "$BRANCH" ] || { echo "$PROG: --branch is required" >&2; exit 1; }
+  local REPO; REPO="$(resolve_repo)"
+  local branches; branches="$(gh api "repos/$REPO/branches" --paginate -q '.[].name' | grep "^$PREVIEW_PREFIX" || true)"
+
+  local ITEMS="" b date rid run_url entry
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    date="$(gh api "repos/$REPO/commits/$b" -q .commit.committer.date 2>/dev/null || true)"
+    rid="$(gh api "repos/$REPO/actions/runs?branch=$b&per_page=1" -q '.workflow_runs[0].id // empty' 2>/dev/null || true)"
+    if [ -n "$rid" ]; then run_url="\"https://github.com/$REPO/actions/runs/$rid\""; else run_url="null"; fi
+    entry="    { \"branch\": \"$(json_escape "$b")\", \"updated\": \"$(json_escape "$date")\", \"run\": $run_url }"
+    ITEMS="${ITEMS:+$ITEMS,
+}$entry"
+  done <<< "$branches"
+
+  printf '{\n  "previews": [\n%s\n  ]\n}\n' "$ITEMS"
+}
+
+cmd_delete() {
+  local ALL=0; local BRANCHES=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -b|--branch)    BRANCHES+=("$2"); shift 2;;
+      --all-previews) ALL=1; shift;;
+      -r|--repo)      REPO_ARG="$2"; shift 2;;
+      -h|--help)      usage; exit 0;;
+      *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
+    esac
+  done
   local REPO; REPO="$(resolve_repo)"
   local DEF; DEF="$(gh api "repos/$REPO" -q .default_branch)"
-  [ "$BRANCH" != "$DEF" ] || { echo "$PROG: refusing to delete the default branch '$DEF'" >&2; exit 1; }
-  gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1 || {
-    echo "$PROG: branch '$BRANCH' does not exist" >&2; exit 1; }
-  gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" >/dev/null
-  echo "$PROG: deleted branch '$BRANCH' from $REPO" >&2
-  cat <<EOF
-{
-  "branch": { "name": "$(json_escape "$BRANCH")", "deleted": true }
+
+  if [ "$ALL" -eq 1 ]; then
+    local extra; extra="$(gh api "repos/$REPO/branches" --paginate -q '.[].name' | grep "^$PREVIEW_PREFIX" || true)"
+    while IFS= read -r b; do [ -n "$b" ] && BRANCHES+=("$b"); done <<< "$extra"
+  fi
+  [ "${#BRANCHES[@]}" -gt 0 ] || { echo "$PROG: nothing to delete (use -b or --all-previews)" >&2; exit 1; }
+
+  local DELETED="" b
+  for b in "${BRANCHES[@]}"; do
+    if [ "$b" = "$DEF" ]; then echo "$PROG: skip default branch '$DEF'" >&2; continue; fi
+    if gh api -X DELETE "repos/$REPO/git/refs/heads/$b" >/dev/null 2>&1; then
+      echo "$PROG: deleted '$b'" >&2
+      DELETED="${DELETED:+$DELETED,}\"$(json_escape "$b")\""
+    else
+      echo "$PROG: could not delete '$b' (missing?)" >&2
+    fi
+  done
+  printf '{ "deleted": [%s] }\n' "$DELETED"
 }
-EOF
+
+cmd_completion() {
+  case "${1:-}" in
+    bash) cat <<'BASH'
+_mayfly() {
+  local cur cmds sub
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  cmds="push keep list delete completion"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") ); return
+  fi
+  sub="${COMP_WORDS[1]}"
+  case "$sub" in
+    push)       COMPREPLY=( $(compgen -W "-b --branch -f --file -m --message -r --repo --open -h --help" -- "$cur") );;
+    keep)       COMPREPLY=( $(compgen -W "-p --path -f --file -b --branch -m --message -r --repo --open -h --help" -- "$cur") );;
+    delete)     COMPREPLY=( $(compgen -W "-b --branch --all-previews -r --repo -h --help" -- "$cur") );;
+    list)       COMPREPLY=( $(compgen -W "-r --repo -h --help" -- "$cur") );;
+    completion) COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") );;
+  esac
+}
+complete -F _mayfly mayfly
+BASH
+      ;;
+    zsh) cat <<'ZSH'
+#compdef mayfly
+_mayfly() {
+  local -a cmds
+  cmds=(push:'throwaway preview' keep:'promote via PR' list:'list previews' delete:'delete branches' completion:'shell completion')
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds; return
+  fi
+  case "${words[2]}" in
+    push)       _arguments '*'{-f,--file}'[file]:file:_files' {-b,--branch}'[branch]:branch:' {-m,--message}'[message]:msg:' {-r,--repo}'[repo]:repo:' '--open[open in browser]' ;;
+    keep)       _arguments {-p,--path}'[pages path]:path:' {-f,--file}'[file]:file:_files' {-b,--branch}'[source branch]:branch:' {-m,--message}'[message]:msg:' {-r,--repo}'[repo]:repo:' '--open[open in browser]' ;;
+    delete)     _arguments '*'{-b,--branch}'[branch]:branch:' '--all-previews[delete all preview/*]' {-r,--repo}'[repo]:repo:' ;;
+    list)       _arguments {-r,--repo}'[repo]:repo:' ;;
+    completion) _values 'shell' bash zsh ;;
+  esac
+}
+_mayfly "$@"
+ZSH
+      ;;
+    *) echo "$PROG: usage: $PROG completion <bash|zsh>" >&2; exit 1;;
+  esac
 }
 
 case "${1:-}" in
   push)        shift; cmd_push "$@";;
   keep)        shift; cmd_keep "$@";;
+  list)        shift; cmd_list "$@";;
   delete|rm)   shift; cmd_delete "$@";;
+  completion)  shift; cmd_completion "$@";;
   -h|--help|"") usage; exit 0;;
   -*)          cmd_push "$@";;
   *)           echo "$PROG: unknown command: $1" >&2; usage; exit 1;;

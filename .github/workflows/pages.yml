@@ -1,0 +1,40 @@
+name: Pages
+
+# Publishes the docs/ directory to GitHub Pages whenever the default branch
+# changes it. "Kept" previews (mayfly keep) land under docs/<path> via a PR;
+# merging that PR triggers this deploy, giving a stable URL.
+#
+# On a GitHub Enterprise Cloud org you can set Pages visibility to "private"
+# (Settings > Pages) so the published site is restricted to people with repo
+# access — that is what makes kept previews access-controlled.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4

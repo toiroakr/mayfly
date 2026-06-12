@@ -2,8 +2,9 @@
 
 A throwaway home for generated HTML (e.g. what an AI/agent produces while
 working). Push a file, get a browser-viewable URL served as a GitHub Actions
-**artifact preview**. Most of it is meant to vanish — branches disappear after
-**90 days**, like a mayfly. The pieces worth keeping can be committed instead.
+**artifact preview**. Most of it is meant to vanish — preview branches disappear
+after **90 days**, like a mayfly. The pieces worth keeping get promoted to
+GitHub Pages.
 
 This is **not** a general "paste any HTML" host. It's for HTML that comes out of
 some process, that you want to glance at or share via a URL without it becoming
@@ -11,66 +12,83 @@ part of a codebase you merge.
 
 ## Two modes
 
-| | command | lives on | lifespan |
+| | command | mechanism | lifespan |
 |---|---|---|---|
-| **Throwaway** (default) | `mayfly push -b <branch> ...` | a throwaway branch | auto-deleted after 90 days |
-| **Keep** (design doc) | `mayfly keep ...` | the default branch | persists until you remove it |
+| **Throwaway** | `mayfly push` | per-file browser-viewable artifact on a `preview/*` branch | auto-deleted after 90 days |
+| **Keep** | `mayfly keep` | opens a PR placing the file under `docs/<path>`; merging publishes it to GitHub Pages | persists; stable URL |
 
-Both upload each `.html` as its own browser-viewable artifact and return the
-preview URLs. (Artifacts themselves always expire after 90 days; `keep` persists
-the *source* so you can always re-preview it.)
-
-## How it works
-
-1. You publish `.html` files to a branch (via the CLI or plain git).
-2. The `Preview` workflow uploads each changed `.html` as its own **non-zipped artifact**.
-3. Each file gets a preview URL (also commented on the commit and shown in the run summary).
-4. Open a URL and the file renders directly in your browser.
-
-> GitHub Actions lets you open an artifact uploaded with `actions/upload-artifact@v7` and `archive: false` directly in the browser, but only for formats the browser can render natively (standalone HTML, images, markdown, etc.). This repo relies on that.
+> Artifact previews work because GitHub Actions can open an artifact uploaded
+> with `actions/upload-artifact@v7` + `archive: false` directly in the browser
+> (standalone HTML, images, markdown). Self-contained HTML only — inline your
+> CSS/JS/images. Pages, by contrast, serves a real static site (external assets
+> work) at a stable URL.
 
 ## Access control
 
-Previews live in this repo as artifacts, so visibility follows the repo's
-settings: make the repo **private** and only authenticated collaborators can
-open the preview URLs.
+- **Throwaway/artifacts:** visibility follows the repo — make the repo private
+  and only authenticated collaborators can open the preview URLs.
+- **Keep/Pages:** on **GitHub Enterprise Cloud** you can set Pages visibility to
+  *private* (Settings → Pages), so kept previews are restricted to people with
+  repo access. On non-Enterprise accounts, Pages is always public.
 
 ## CLI
 
 Put `mayfly` on your `PATH`:
 
 ```bash
-ln -s "$PWD/mayfly" /usr/local/bin/mayfly   # or copy it anywhere on PATH
+ln -s "$PWD/mayfly" /usr/local/bin/mayfly
 ```
 
 ```bash
-# throwaway preview (stdout is JSON only, so it pipes into jq)
-mayfly push -b agent-run-42 -f /tmp/report.html
+# throwaway preview — branch name auto-generated (preview/<ts>-<rnd>) if -b omitted
+mayfly push -f /tmp/report.html
+mayfly push -f a.html -f b.html --open      # multiple files, open the first in a browser
+mayfly push -b design-review -f r.html      # name it to keep updating the same preview
 
-# keep some of them as design docs (committed to the default branch under docs/)
-mayfly keep -p docs -f /tmp/design-v3.html
+# keep it — opens a PR placing the file at docs/<path> (the eventual Pages URL path)
+mayfly keep -p design-v3/index.html -f /tmp/design.html
+mayfly keep -p design-v3/index.html -b preview/20260612-... -f design.html   # source from a preview branch
 
-# clean up a throwaway branch early
-mayfly delete -b agent-run-42
+# see what's live / clean up
+mayfly list
+mayfly delete -b preview/20260612-...        # one or more -b
+mayfly delete --all-previews                 # every preview/* branch
 ```
 
-```json
-{
-  "branch": { "name": "agent-run-42", "url": "https://github.com/you/mayfly/tree/agent-run-42" },
-  "files": [
-    { "name": "report.html", "url": "https://github.com/you/mayfly/actions/runs/123/artifacts/456" }
-  ]
-}
+`push` prints per-file URLs; `keep` prints the PR URL. stdout is JSON only
+(stderr carries progress), so it pipes into `jq`:
+
+```bash
+mayfly push -f r.html | jq -r '.files[0].url'
 ```
 
-The CLI talks to the GitHub API (no local checkout needed), so an agent can call
-it directly. The target repo is resolved from `--repo`, then `$MAYFLY_REPO`,
-then the repo of the current directory (`gh repo view`).
+**Fire-and-forget** (no need for a flag): background the call and capture the
+JSON to a file.
+
+```bash
+mayfly push -f r.html > /tmp/r.json 2>/dev/null &
+# ... later ...
+jq -r '.files[0].url' /tmp/r.json
+```
+
+The CLI talks to the GitHub API (no local checkout), so an agent can call it
+directly. Target repo: `--repo` > `$MAYFLY_REPO` > the current directory's repo.
+
+### Shell completion
+
+```bash
+# zsh
+source <(mayfly completion zsh)     # or save to a file in your $fpath
+# bash
+source <(mayfly completion bash)
+```
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `mayfly` | CLI: `push` (throwaway) / `keep` (persist) / `delete` |
+| `mayfly` | CLI: `push` / `keep` / `list` / `delete` / `completion` |
 | `.github/workflows/preview.yml` | Uploads each pushed `.html` as an artifact and comments the URLs |
-| `.github/workflows/cleanup.yml` | Deletes branches idle for 90 days, daily (default branch is never touched) |
+| `.github/workflows/cleanup.yml` | Deletes `preview/*` branches idle for 90 days, daily |
+| `.github/workflows/pages.yml` | Publishes `docs/` to GitHub Pages on merge to the default branch |
+| `docs/` | GitHub Pages root; kept previews live here |
