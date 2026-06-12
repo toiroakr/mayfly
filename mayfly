@@ -23,6 +23,7 @@ Usage:
   $PROG keep   -p <path> -f <file> [-b <branch>] [--open]
   $PROG list
   $PROG delete (-b <branch> [-b <branch> ...] | --all-previews)
+  $PROG integrate [--force]
   $PROG completion <bash|zsh>
 
 Commands:
@@ -33,6 +34,9 @@ Commands:
            local file (-f), or a file on a preview branch (-b <branch> -f <name>).
   list     List live preview/* branches with their latest run.
   delete   Delete one or more branches, or every preview/* branch.
+  integrate Scaffold previews into the current repo: a push-triggered workflow
+           for mayfly/* branches plus a separate repo-local CLI
+           (.github/mayfly-preview) that posts a local file's preview onto a PR.
 
 Options:
   -b, --branch <name>   Branch (push: target; keep: source preview branch; delete: target).
@@ -332,7 +336,7 @@ cmd_completion() {
 _mayfly() {
   local cur cmds sub
   cur="${COMP_WORDS[COMP_CWORD]}"
-  cmds="push keep list delete completion"
+  cmds="push keep list delete integrate completion"
   if [ "$COMP_CWORD" -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") ); return
   fi
@@ -342,6 +346,7 @@ _mayfly() {
     keep)       COMPREPLY=( $(compgen -W "-p --path -f --file -b --branch -m --message -r --repo --open -h --help" -- "$cur") );;
     delete)     COMPREPLY=( $(compgen -W "-b --branch --all-previews -r --repo -h --help" -- "$cur") );;
     list)       COMPREPLY=( $(compgen -W "-r --repo -h --help" -- "$cur") );;
+    integrate)  COMPREPLY=( $(compgen -W "--force -h --help" -- "$cur") );;
     completion) COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") );;
   esac
 }
@@ -352,7 +357,7 @@ BASH
 #compdef mayfly
 _mayfly() {
   local -a cmds
-  cmds=(push:'throwaway preview' keep:'promote via PR' list:'list previews' delete:'delete branches' completion:'shell completion')
+  cmds=(push:'throwaway preview' keep:'promote via PR' list:'list previews' delete:'delete branches' integrate:'scaffold into a repo' completion:'shell completion')
   if (( CURRENT == 2 )); then
     _describe 'command' cmds; return
   fi
@@ -361,6 +366,7 @@ _mayfly() {
     keep)       _arguments {-p,--path}'[pages path]:path:' {-f,--file}'[file]:file:_files' {-b,--branch}'[source branch]:branch:' {-m,--message}'[message]:msg:' {-r,--repo}'[repo]:repo:' '--open[open in browser]' ;;
     delete)     _arguments '*'{-b,--branch}'[branch]:branch:' '--all-previews[delete all preview/*]' {-r,--repo}'[repo]:repo:' ;;
     list)       _arguments {-r,--repo}'[repo]:repo:' ;;
+    integrate)  _arguments '--force[overwrite existing files]' ;;
     completion) _values 'shell' bash zsh ;;
   esac
 }
@@ -371,11 +377,262 @@ ZSH
   esac
 }
 
+cmd_integrate() {
+  local FORCE=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force)   FORCE=1; shift;;
+      -h|--help) usage; exit 0;;
+      *) echo "$PROG: unknown argument: $1" >&2; usage; exit 1;;
+    esac
+  done
+  [ -d .git ] || echo "$PROG: warning: '$PWD' is not a git repo root" >&2
+  mkdir -p .github/workflows
+
+  _wf() { # _wf <path>  (content on stdin)
+    if [ -e "$1" ] && [ "$FORCE" -ne 1 ]; then
+      cat >/dev/null
+      echo "$PROG: exists, skipped $1 (use --force to overwrite)" >&2
+    else
+      cat > "$1"
+      echo "$PROG: wrote $1" >&2
+    fi
+  }
+
+  _wf .github/workflows/mayfly-preview.yml <<'PREVIEW_YML'
+name: mayfly preview
+
+# Installed by `mayfly integrate`. Turns HTML pushed to mayfly/* branches into
+# browser-viewable artifacts. PR commenting is done by .github/mayfly-preview.
+
+on:
+  push:
+    branches: ['mayfly/**']
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.collect.outputs.files }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: collect
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BEFORE_SHA" ] \
+             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            CHANGED=$(git ls-files '*.html')
+          else
+            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
+          fi
+          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
+          done)
+          FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+  upload:
+    needs: detect
+    if: needs.detect.outputs.files != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.detect.outputs.files) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - id: name
+        env:
+          FILE: ${{ matrix.file }}
+        run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: ${{ matrix.file }}
+          if-no-files-found: error
+          archive: false
+PREVIEW_YML
+
+  _wf .github/workflows/mayfly-cleanup.yml <<'CLEANUP_YML'
+name: mayfly cleanup
+
+# Installed by `mayfly integrate`. Deletes mayfly/* preview branches idle for
+# 90 days (matches the Actions artifact default retention). Only mayfly/*
+# branches are touched.
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # daily 00:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      STALE_DAYS: '90'
+    steps:
+      - run: |
+          set -euo pipefail
+          CUTOFF=$(date -u -d "$STALE_DAYS days ago" +%s)
+          gh api "repos/$REPO/branches" --paginate -q '.[].name' | while IFS= read -r b; do
+            case "$b" in mayfly/*) ;; *) continue;; esac
+            DATE=$(gh api "repos/$REPO/commits/$b" -q '.commit.committer.date')
+            TS=$(date -u -d "$DATE" +%s)
+            if [ "$TS" -lt "$CUTOFF" ]; then
+              echo "Deleting stale branch: $b"
+              gh api -X DELETE "repos/$REPO/git/refs/heads/$b"
+            fi
+          done
+CLEANUP_YML
+
+  _wf .github/mayfly-preview <<'CLI'
+#!/usr/bin/env bash
+#
+# mayfly-preview — post a local HTML file's preview onto a PR.
+# Installed by `mayfly integrate`. Pushes the file to a mayfly/* branch (CI
+# builds the artifact via .github/workflows/mayfly-preview.yml) and comments
+# the preview URL on the PR.
+#
+#   mayfly-preview -f <file> [-f <file> ...] --pr <N> [--target comment|description|both]
+#
+set -euo pipefail
+PROG="mayfly-preview"
+PREFIX="mayfly/"
+MARK='<!-- mayfly-preview -->'
+DS='<!-- mayfly-preview:start -->'
+DE='<!-- mayfly-preview:end -->'
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+FILES=(); PR=""; TARGET="comment"; MESSAGE=""; REPO_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f|--file)    FILES+=("$2"); shift 2;;
+    --pr)         PR="$2"; shift 2;;
+    --target)     TARGET="$2"; shift 2;;
+    -m|--message) MESSAGE="$2"; shift 2;;
+    -r|--repo)    REPO_ARG="$2"; shift 2;;
+    -h|--help)    sed -n '3,9p' "$0"; exit 0;;
+    *) die "unknown argument: $1";;
+  esac
+done
+[ "${#FILES[@]}" -gt 0 ] || die "at least one --file is required"
+[ -n "$PR" ] || die "--pr <number> is required"
+case "$TARGET" in comment|description|both) ;; *) die "--target must be comment|description|both";; esac
+
+REPO="${REPO_ARG:-${MAYFLY_REPO:-}}"
+[ -z "$REPO" ] && REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+[ -n "$REPO" ] || die "cannot determine repo; run inside the repo or set MAYFLY_REPO"
+: "${MESSAGE:=mayfly: preview for PR #$PR}"
+
+DEF="$(gh api "repos/$REPO" -q .default_branch)"
+BASE="$(gh api "repos/$REPO/git/ref/heads/$DEF" -q .object.sha)"
+BRANCH="$PREFIX$(date +%Y%m%d-%H%M%S)-$RANDOM"
+gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" >/dev/null
+BASE_TREE="$(gh api "repos/$REPO/git/commits/$BASE" -q .tree.sha)"
+
+TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
+ENTRIES=""; USED=""; DESTS=()
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] || die "file not found: $f"
+  b="$(basename "$f")"; stem="$b"; ext=""
+  case "$b" in *.*) stem="${b%.*}"; ext=".${b##*.}";; esac
+  d="$b"; n=1
+  while case " $USED " in *" $d "*) true;; *) false;; esac; do n=$((n + 1)); d="$stem-$n$ext"; done
+  USED="$USED $d"; DESTS+=("$d")
+  { printf '{"encoding":"base64","content":"'; base64 < "$f" | tr -d '\n'; printf '"}'; } > "$TMPD/b.json"
+  sha="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/b.json" -q .sha)"
+  ENTRIES="${ENTRIES:+$ENTRIES,}{\"path\":\"$d\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"}"
+done
+printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$ENTRIES" > "$TMPD/t.json"
+TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/t.json" -q .sha)"
+COMMIT="$(gh api -X POST "repos/$REPO/git/commits" -f message="$MESSAGE" -f tree="$TREE" -f "parents[]=$BASE" -q .sha)"
+gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$COMMIT" >/dev/null
+echo "$PROG: pushed ${#DESTS[@]} file(s) to $BRANCH" >&2
+
+RID=""
+echo -n "$PROG: waiting for run" >&2
+for i in $(seq 1 40); do
+  RID="$(gh api "repos/$REPO/actions/runs?head_sha=$COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
+  [ -n "$RID" ] && break; echo -n "." >&2; sleep 3
+done
+echo >&2
+[ -n "$RID" ] || die "timed out finding workflow run (is mayfly-preview.yml pushed?)"
+gh run watch "$RID" -R "$REPO" --exit-status >/dev/null 2>&1 || echo "$PROG: warning: run did not complete cleanly" >&2
+ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+
+PREVIEW="$TMPD/preview.md"
+{
+  printf '🦋 **mayfly preview**\n\n'
+  for d in "${DESTS[@]}"; do
+    id="$(printf '%s\n' "$ARTS" | awk -F'\t' -v n="$d" '$1==n{print $2; exit}')"
+    [ -n "$id" ] && printf -- '- [%s](https://github.com/%s/actions/runs/%s/artifacts/%s)\n' "$d" "$REPO" "$RID" "$id"
+  done
+  printf '\nOpen an artifact, then view it in your browser. Expires in 90 days.\n'
+} > "$PREVIEW"
+
+case "$TARGET" in
+  comment|both)
+    { printf '%s\n' "$MARK"; cat "$PREVIEW"; } > "$TMPD/c.md"
+    CID="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq 'map(select(.body | contains("<!-- mayfly-preview -->"))) | .[0].id // empty')"
+    if [ -n "$CID" ]; then
+      gh api --method PATCH "repos/$REPO/issues/comments/$CID" -F "body=@$TMPD/c.md" >/dev/null
+    else
+      gh api --method POST "repos/$REPO/issues/$PR/comments" -F "body=@$TMPD/c.md" >/dev/null
+    fi
+    ;;
+esac
+case "$TARGET" in
+  description|both)
+    CUR="$(gh api "repos/$REPO/pulls/$PR" --jq '.body // ""')"
+    STRIPPED="$(printf '%s' "$CUR" | awk -v s="$DS" -v e="$DE" '$0==s{skip=1} skip==0{print} $0==e{skip=0}')"
+    { printf '%s' "$STRIPPED"; printf '\n\n%s\n' "$DS"; cat "$PREVIEW"; printf '%s\n' "$DE"; } > "$TMPD/d.md"
+    gh api --method PATCH "repos/$REPO/pulls/$PR" -F "body=@$TMPD/d.md" >/dev/null
+    ;;
+esac
+echo "$PROG: posted preview to PR #$PR ($TARGET)" >&2
+CLI
+  chmod +x .github/mayfly-preview 2>/dev/null || true
+
+  cat >&2 <<'NEXT'
+mayfly: integration scaffolded.
+  1) Commit & push the new files:
+       .github/workflows/mayfly-preview.yml
+       .github/workflows/mayfly-cleanup.yml
+       .github/mayfly-preview
+  2) Post a local file's preview onto a PR:
+       .github/mayfly-preview -f page.html --pr <number>
+     (--target comment|description|both)
+NEXT
+}
+
 case "${1:-}" in
   push)        shift; cmd_push "$@";;
   keep)        shift; cmd_keep "$@";;
   list)        shift; cmd_list "$@";;
   delete|rm)   shift; cmd_delete "$@";;
+  integrate)   shift; cmd_integrate "$@";;
   completion)  shift; cmd_completion "$@";;
   -h|--help|"") usage; exit 0;;
   -*)          cmd_push "$@";;

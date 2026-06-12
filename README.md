@@ -15,7 +15,7 @@ part of a codebase you merge.
 | | command | mechanism | lifespan |
 |---|---|---|---|
 | **Throwaway** | `mayfly push` | per-file browser-viewable artifact on a `preview/*` branch | auto-deleted after 90 days |
-| **Keep** | `mayfly keep` | opens a PR placing the file under `docs/<path>`; merging publishes it to GitHub Pages | persists; stable URL |
+| **Keep** | `mayfly keep` | opens a PR placing the file under `docs/<path>` (the PR gets an auto preview comment); merging publishes it to GitHub Pages | persists; stable URL |
 
 > Artifact previews work because GitHub Actions can open an artifact uploaded
 > with `actions/upload-artifact@v7` + `archive: false` directly in the browser
@@ -31,13 +31,33 @@ part of a codebase you merge.
   *private* (Settings → Pages), so kept previews are restricted to people with
   repo access. On non-Enterprise accounts, Pages is always public.
 
-## Add previews to an existing repo
+## Integrate into an existing repo
 
 Run `mayfly integrate` inside a repo to add throwaway previews there without
-forking. It scaffolds a push-triggered preview workflow (uploading HTML on
-`mayfly/*` branches as artifacts) and installs a small, **separate** repo-local
-CLI for posting a local file's preview onto a PR — see
-[Integrate into an existing repo](#integrate-into-an-existing-repo).
+forking — previews then live in that repo and follow its permissions.
+
+```bash
+cd your-repo
+mayfly integrate          # --force to overwrite existing files
+git add .github && git commit -m "Add mayfly previews" && git push
+```
+
+It scaffolds three files (no external dependency beyond GitHub's own actions,
+pinned by SHA — read them before trusting them):
+
+| File | Role |
+|---|---|
+| `.github/workflows/mayfly-preview.yml` | On push to `mayfly/*` branches, upload each HTML as a browser-viewable artifact |
+| `.github/workflows/mayfly-cleanup.yml` | Delete `mayfly/*` branches idle for 90 days |
+| `.github/mayfly-preview` | A **separate**, repo-local CLI (not the full `mayfly`) for posting a preview onto a PR |
+
+Post a local file's preview onto a PR (pushes to a `mayfly/*` branch, lets CI
+build the artifact, then comments the URL):
+
+```bash
+.github/mayfly-preview -f page.html --pr 123
+.github/mayfly-preview -f page.html --pr 123 --target both   # comment | description | both
+```
 
 ## Setup (create your own from this template)
 
@@ -120,8 +140,9 @@ source <(mayfly completion bash)
 
 | File | Role |
 |---|---|
-| `mayfly` | CLI: `push` / `keep` / `list` / `delete` / `completion` |
+| `mayfly` | CLI: `push` / `keep` / `list` / `delete` / `integrate` / `completion` |
 | `.github/workflows/preview.yml` | Uploads each pushed `.html` as an artifact and comments the URLs |
+| `.github/workflows/keep-preview.yml` | On a keep PR, comments a preview of the `docs/` page before merge |
 | `.github/workflows/cleanup.yml` | Deletes `preview/*` branches idle for 90 days, daily |
 | `.github/workflows/pages.yml` | Publishes `docs/` to GitHub Pages on merge to the default branch |
 | `docs/` | GitHub Pages root; kept previews live here |
