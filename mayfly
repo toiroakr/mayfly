@@ -92,17 +92,25 @@ publish() {
 
   TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
 
-  local TREE_ENTRIES="" BASENAMES="" path base blob
+  local TREE_ENTRIES="" USED="" path base dest stem ext n blob
   local DESTLIST=()
   for path in "$@"; do
     [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
     base="$(basename "$path")"
-    case " $BASENAMES " in *" $base "*) echo "$PROG: duplicate file name: $base" >&2; exit 1;; esac
-    BASENAMES="$BASENAMES $base"; DESTLIST+=("$base")
+    # A non-zipped artifact is keyed by its file basename, so basenames must be
+    # unique. Rather than reject collisions, rename "<stem>.<ext>" to
+    # "<stem>-N.<ext>" (extension preserved so the browser still renders it).
+    stem="$base"; ext=""
+    case "$base" in *.*) stem="${base%.*}"; ext=".${base##*.}";; esac
+    dest="$base"; n=1
+    while case " $USED " in *" $dest "*) true;; *) false;; esac; do
+      n=$((n + 1)); dest="$stem-$n$ext"
+    done
+    USED="$USED $dest"; DESTLIST+=("$dest")
     { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
     blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
-    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$base\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
-    echo "$PROG: staged $base" >&2
+    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$dest\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
+    if [ "$dest" = "$base" ]; then echo "$PROG: staged $dest" >&2; else echo "$PROG: staged $dest (renamed from $base)" >&2; fi
   done
 
   printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$TREE_ENTRIES" > "$TMPD/tree.json"
