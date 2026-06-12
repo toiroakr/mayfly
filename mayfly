@@ -268,13 +268,24 @@ cmd_list() {
   local REPO; REPO="$(resolve_repo)"
   local branches; branches="$(gh api "repos/$REPO/branches" --paginate -q '.[].name' | grep "^$PREVIEW_PREFIX" || true)"
 
-  local ITEMS="" b date rid run_url entry
+  local ITEMS="" b date rid run_url arts files_json aname aid fu entry
   while IFS= read -r b; do
     [ -n "$b" ] || continue
     date="$(gh api "repos/$REPO/commits/$b" -q .commit.committer.date 2>/dev/null || true)"
     rid="$(gh api "repos/$REPO/actions/runs?branch=$b&per_page=1" -q '.workflow_runs[0].id // empty' 2>/dev/null || true)"
-    if [ -n "$rid" ]; then run_url="\"https://github.com/$REPO/actions/runs/$rid\""; else run_url="null"; fi
-    entry="    { \"branch\": \"$(json_escape "$b")\", \"updated\": \"$(json_escape "$date")\", \"run\": $run_url }"
+    files_json=""
+    if [ -n "$rid" ]; then
+      run_url="\"https://github.com/$REPO/actions/runs/$rid\""
+      arts="$(gh api "repos/$REPO/actions/runs/$rid/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+      while IFS=$'\t' read -r aname aid; do
+        [ -n "$aname" ] || continue
+        fu="https://github.com/$REPO/actions/runs/$rid/artifacts/$aid"
+        files_json="${files_json:+$files_json, }{ \"name\": \"$(json_escape "$aname")\", \"url\": \"$(json_escape "$fu")\" }"
+      done <<< "$arts"
+    else
+      run_url="null"
+    fi
+    entry="    { \"branch\": \"$(json_escape "$b")\", \"updated\": \"$(json_escape "$date")\", \"run\": $run_url, \"files\": [$files_json] }"
     ITEMS="${ITEMS:+$ITEMS,
 }$entry"
   done <<< "$branches"
