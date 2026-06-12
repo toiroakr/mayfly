@@ -13,7 +13,38 @@ Short-lived like a mayfly: branches vanish after **90 days**.
 
 > GitHub Actions lets you open an artifact uploaded with `actions/upload-artifact@v7` and `archive: false` directly in the browser, but only for formats the browser can render natively (standalone HTML, images, markdown, etc.). This repo relies on that.
 
-## Usage
+## Add it to an existing repo (recommended)
+
+Instead of forking, call mayfly as a **reusable workflow** from a repo you
+already have. Previews then live in that repo and inherit its access
+permissions automatically (private repo => only authenticated collaborators
+can open them). Drop this into `.github/workflows/html-preview.yml`:
+
+```yaml
+name: HTML Preview
+on:
+  pull_request:
+    paths: ['**.html']
+jobs:
+  preview:
+    uses: toiroakr/mayfly/.github/workflows/preview.yml@v1
+    permissions:
+      contents: read
+      pull-requests: write
+```
+
+On each PR touching an `.html` file, every changed file is uploaded as a
+browser-viewable artifact and the preview URLs are posted as a single,
+self-updating PR comment. See [`examples/html-preview.yml`](examples/html-preview.yml).
+
+> **Notes**
+> - Do **not** add `cleanup.yml` to a real repo — it deletes branches idle for
+>   90 days, which only makes sense for the dedicated-fork model below.
+> - PRs from forks get a read-only token, so commenting won't work for them
+>   without `pull_request_target` (which has security trade-offs). Same-repo
+>   branches work out of the box.
+
+## Use as a standalone repo (fork model)
 
 **Fork** this repository (or use "Use this template") and use it under your own account.
 
