@@ -1,10 +1,34 @@
 name: Preview
 
+# Works three ways:
+#   - push in this repo (the dedicated previews repo / mayfly CLI target)
+#   - pull_request in this repo
+#   - reusable workflow for an existing repo:
+#       jobs.preview.uses: toiroakr/mayfly/.github/workflows/preview.yml@<sha>
+#     Pure YAML, no bundled code or third-party npm deps — auditable in full.
+#     The only external actions are GitHub's own, pinned by commit SHA.
+
 on:
   push:
     paths:
       - '**.html'
-      - '!docs/**'   # docs/ is published via Pages (pages.yml), not artifact previews
+      - '!docs/**'   # docs/ is published via Pages (pages.yml), not previews
+  pull_request:
+    paths:
+      - '**.html'
+      - '!docs/**'
+  workflow_call:
+    inputs:
+      files:
+        description: 'Glob of HTML files to preview (overrides change detection).'
+        type: string
+        required: false
+        default: ''
+      pr_target:
+        description: 'Where to post preview links on a PR: comment | description | both.'
+        type: string
+        required: false
+        default: 'comment'
 
 permissions:
   contents: read
@@ -15,21 +39,29 @@ jobs:
     outputs:
       files: ${{ steps.collect.outputs.files }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Collect changed HTML files
+      - name: Collect target HTML files
         id: collect
         env:
+          EVENT: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          GLOB: ${{ inputs.files }}
         run: |
           set -euo pipefail
-          if [ -z "$BEFORE_SHA" ] \
-             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
-            # New branch or shallow history: target all .html files
+          if [ -n "${GLOB:-}" ]; then
+            CHANGED=$(git ls-files "$GLOB")
+          elif [ "$EVENT" = "pull_request" ]; then
+            CHANGED=$(git diff --name-only "$PR_BASE...$PR_HEAD" -- '*.html')
+          elif [ -z "$BEFORE_SHA" ] \
+               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
             CHANGED=$(git ls-files '*.html')
           else
             CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
@@ -40,7 +72,7 @@ jobs:
           done)
           FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "changed: $FILES"
+          echo "targets: $FILES"
 
   upload:
     needs: detect
@@ -53,7 +85,9 @@ jobs:
       matrix:
         file: ${{ fromJSON(needs.detect.outputs.files) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Compute artifact name
         id: name
@@ -62,37 +96,90 @@ jobs:
         run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
 
       - name: Upload preview artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.name.outputs.name }}
           path: ${{ matrix.file }}
+          if-no-files-found: error
           archive: false
 
   comment:
     needs: [detect, upload]
-    if: needs.detect.outputs.files != '[]'
+    # Skip fork PRs, whose read-only token cannot comment.
+    if: >-
+      needs.detect.outputs.files != '[]' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
+      actions: read # required to list the run's artifacts
     steps:
-      - name: Comment preview URLs on the commit
+      - name: Post preview URLs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SERVER: ${{ github.server_url }}
+          PR_TARGET: ${{ inputs.pr_target }}
+          MARKER: '<!-- mayfly-preview -->'
+          DSTART: '<!-- mayfly-preview:start -->'
+          DEND: '<!-- mayfly-preview:end -->'
         run: |
           set -euo pipefail
-          ARTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-                 -q '.artifacts[] | "\(.name)\t\(.id)"')
-          BODY="$RUNNER_TEMP/mayfly-body.md"
+          : "${PR_TARGET:=comment}"
+
+          # Shared preview markdown (header + per-file links + note).
+          ARTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate \
+                 --jq '.artifacts[] | [.name, (.id|tostring)] | @tsv')
+          PREVIEW="$RUNNER_TEMP/preview.md"
           {
-            printf '🦋 **mayfly preview**\n\n'
+            printf '### 🦋 mayfly preview\n\n'
+            printf 'Open an artifact, then view it in your browser:\n'
             printf '%s\n' "$ARTS" | while IFS=$'\t' read -r name id; do
               [ -n "$name" ] || continue
-              printf -- '- [%s](https://github.com/%s/actions/runs/%s/artifacts/%s)\n' \
-                "$name" "$REPO" "$RUN_ID" "$id"
+              printf -- '- [%s](%s/%s/actions/runs/%s/artifacts/%s)\n' \
+                "$name" "$SERVER" "$REPO" "$RUN_ID" "$id"
             done
-            printf '\nClick a file to view it in the browser. Expires in 90 days.\n'
-          } > "$BODY"
-          gh api "repos/$REPO/commits/$SHA/comments" -F "body=@$BODY" >/dev/null
+            printf '\n_Expires in 90 days._\n'
+          } > "$PREVIEW"
+
+          # push (dedicated repo): comment on the commit, nothing else.
+          if [ "$EVENT" != "pull_request" ]; then
+            { printf '%s\n' "$MARKER"; cat "$PREVIEW"; } > "$RUNNER_TEMP/commit.md"
+            gh api "repos/$REPO/commits/$SHA/comments" -F "body=@$RUNNER_TEMP/commit.md" >/dev/null
+            exit 0
+          fi
+
+          # PR: sticky comment and/or PR description block, per pr_target.
+          case "$PR_TARGET" in
+            comment|both)
+              { printf '%s\n' "$MARKER"; cat "$PREVIEW"; } > "$RUNNER_TEMP/comment.md"
+              CID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+                    --jq 'map(select(.body | contains(env.MARKER))) | .[0].id // empty')
+              if [ -n "$CID" ]; then
+                gh api --method PATCH "repos/$REPO/issues/comments/$CID" -F "body=@$RUNNER_TEMP/comment.md" >/dev/null
+              else
+                gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$RUNNER_TEMP/comment.md" >/dev/null
+              fi
+              ;;
+          esac
+          case "$PR_TARGET" in
+            description|both)
+              CUR=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.body // ""')
+              # Drop any previous mayfly block, then append a fresh one.
+              STRIPPED=$(printf '%s' "$CUR" | awk -v s="$DSTART" -v e="$DEND" '
+                $0==s {skip=1} skip==0 {print} $0==e {skip=0}')
+              {
+                printf '%s' "$STRIPPED"
+                printf '\n\n%s\n' "$DSTART"
+                cat "$PREVIEW"
+                printf '%s\n' "$DEND"
+              } > "$RUNNER_TEMP/desc.md"
+              gh api --method PATCH "repos/$REPO/pulls/$PR_NUMBER" -F "body=@$RUNNER_TEMP/desc.md" >/dev/null
+              ;;
+          esac

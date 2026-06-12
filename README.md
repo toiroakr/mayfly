@@ -31,6 +31,50 @@ part of a codebase you merge.
   *private* (Settings → Pages), so kept previews are restricted to people with
   repo access. On non-Enterprise accounts, Pages is always public.
 
+## Add previews to an existing repo (reusable workflow)
+
+You don't have to use a dedicated repo. Any repo can get throwaway previews on
+its PRs by calling mayfly's **reusable workflow**. Drop this into
+`.github/workflows/html-preview.yml` (see [`examples/html-preview.yml`](examples/html-preview.yml)):
+
+```yaml
+name: HTML Preview
+on:
+  pull_request:
+    paths: ['**.html']
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  preview:
+    uses: toiroakr/mayfly/.github/workflows/preview.yml@v1
+```
+
+On each PR touching an `.html` file, every changed file is uploaded as a
+browser-viewable artifact and the URLs are posted to the PR. By default they go
+to a single, self-updating **comment**; set `pr_target` to `description` (append
+a self-replacing block to the PR body) or `both`:
+
+```yaml
+jobs:
+  preview:
+    uses: toiroakr/mayfly/.github/workflows/preview.yml@v1
+    with:
+      pr_target: both   # comment | description | both
+```
+
+Previews live in that repo, so access follows its permissions.
+
+**Why a reusable workflow (not a published Action):** it's **pure YAML** — no
+bundled JavaScript, no third-party npm dependencies — so you can read the whole
+thing before trusting it, and the only external actions it uses are GitHub's
+own, pinned to commit SHAs. For supply-chain safety:
+
+- **Pin to a commit SHA**, not the moving `@v1` tag:
+  `uses: toiroakr/mayfly/.github/workflows/preview.yml@<sha>`.
+- Grant **least privilege** (the example grants exactly what's needed).
+- Fork PRs are **skipped** (their read-only token can't comment).
+
 ## Setup (create your own from this template)
 
 mayfly is a **template repository**. To run your own:

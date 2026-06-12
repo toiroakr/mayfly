@@ -1,0 +1,32 @@
+# Drop this into an existing repo as `.github/workflows/html-preview.yml`.
+# On every PR that changes an .html file, mayfly uploads each file as a
+# browser-viewable artifact and posts the preview URLs as a single, self-
+# updating PR comment. Previews live in *this* repo, so access follows this
+# repo's permissions (private repo => authenticated collaborators only).
+#
+# Supply-chain notes:
+#   - mayfly's reusable workflow is pure YAML (no bundled code / npm deps) —
+#     read it before trusting it.
+#   - Pin it to a commit SHA, not a moving tag. Replace @v1 below with the SHA
+#     you audited, e.g. @1a2b3c4...  (`gh api repos/toiroakr/mayfly/commits/v1 -q .sha`).
+#   - The job below grants least privilege; mayfly needs no more than this.
+
+name: HTML Preview
+
+on:
+  pull_request:
+    paths:
+      - '**.html'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    uses: toiroakr/mayfly/.github/workflows/preview.yml@v1
+    # with:
+    #   # Where to post the links on the PR: comment | description | both.
+    #   pr_target: comment
+    #   # Preview a fixed set instead of just the PR's changed files.
+    #   files: 'dist/**/*.html'
