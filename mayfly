@@ -81,8 +81,8 @@ cmd_push() {
   HEAD_SHA="$(ensure_branch "$REPO" "$BRANCH")"
   BASE_TREE="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" -q .tree.sha)"
 
-  local TMPD; TMPD="$(mktemp -d)"
-  trap 'rm -rf "$TMPD"' EXIT
+  TMPD="$(mktemp -d)"
+  trap 'rm -rf "${TMPD:-}"' EXIT
 
   # Build tree entries; stream blob bodies via a file to dodge argv limits.
   local TREE_ENTRIES="" DESTS=""
