@@ -214,7 +214,9 @@ cmd_keep() {
   echo "$PROG: created keep branch '$KEEP_BRANCH'" >&2
 
   # Place the file at docs/<path> on the keep branch (update if it already exists).
-  local EXIST_SHA; EXIST_SHA="$(gh api "repos/$REPO/contents/$DEST?ref=$KEEP_BRANCH" -q .sha 2>/dev/null || true)"
+  # Note: gh prints the error body to stdout on 404, so guard on exit status.
+  local EXIST_SHA=""
+  EXIST_SHA="$(gh api "repos/$REPO/contents/$DEST?ref=$KEEP_BRANCH" -q .sha 2>/dev/null)" || EXIST_SHA=""
   {
     printf '{"message":"%s","branch":"%s","content":"' "$(json_escape "$MESSAGE")" "$KEEP_BRANCH"
     cat "$TMPD/b64"
