@@ -1,25 +1,9 @@
 name: Preview
 
-# Works three ways:
-#   - push / pull_request in this repo (the template / fork model)
-#   - reusable workflow (`uses: toiroakr/mayfly/.github/workflows/preview.yml@v1`)
-#     called from an existing repo, so previews live there and inherit its
-#     access permissions.
-
 on:
   push:
     paths:
       - '**.html'
-  pull_request:
-    paths:
-      - '**.html'
-  workflow_call:
-    inputs:
-      files:
-        description: 'Glob of HTML files to preview (overrides change detection).'
-        type: string
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -34,31 +18,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Collect target HTML files
+      - name: Collect changed HTML files
         id: collect
         env:
-          EVENT: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          GLOB: ${{ inputs.files }}
         run: |
           set -euo pipefail
-          if [ -n "${GLOB:-}" ]; then
-            CHANGED=$(git ls-files "$GLOB")
-          elif [ "$EVENT" = "pull_request" ]; then
-            CHANGED=$(git diff --name-only "$PR_BASE...$PR_HEAD" -- '*.html')
-          elif [ -z "$BEFORE_SHA" ] \
-               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-               || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+          if [ -z "$BEFORE_SHA" ] \
+             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            # New branch or shallow history: target all .html files
             CHANGED=$(git ls-files '*.html')
           else
             CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
           fi
           FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "targets: $FILES"
+          echo "changed: $FILES"
 
   upload:
     needs: detect
@@ -92,25 +69,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
-      - name: Post preview URLs
+      - name: Comment preview URLs on the commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          EVENT: ${{ github.event_name }}
           SHA: ${{ github.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          MARKER='<!-- mayfly-preview -->'
           ARTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
                  -q '.artifacts[] | "\(.name)\t\(.id)"')
-
           BODY="$RUNNER_TEMP/mayfly-body.md"
           {
-            printf '%s\n🦋 **mayfly preview**\n\n' "$MARKER"
+            printf '🦋 **mayfly preview**\n\n'
             printf '%s\n' "$ARTS" | while IFS=$'\t' read -r name id; do
               [ -n "$name" ] || continue
               printf -- '- [%s](https://github.com/%s/actions/runs/%s/artifacts/%s)\n' \
@@ -118,15 +90,4 @@ jobs:
             done
             printf '\nClick a file to view it in the browser. Expires in 90 days.\n'
           } > "$BODY"
-
-          if [ "$EVENT" = "pull_request" ]; then
-            CID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
-                  -q "first(.[] | select(.body | startswith(\"$MARKER\")) | .id) // empty")
-            if [ -n "$CID" ]; then
-              gh api -X PATCH "repos/$REPO/issues/comments/$CID" -F "body=@$BODY" >/dev/null
-            else
-              gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$BODY" >/dev/null
-            fi
-          else
-            gh api "repos/$REPO/commits/$SHA/comments" -F "body=@$BODY" >/dev/null
-          fi
+          gh api "repos/$REPO/commits/$SHA/comments" -F "body=@$BODY" >/dev/null

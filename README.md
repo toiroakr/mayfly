@@ -1,109 +1,76 @@
 # 🦋 mayfly
 
-Drop in some HTML and get back browser-viewable URLs, served as GitHub Actions **artifact previews**. Disposable HTML hosting.
+A throwaway home for generated HTML (e.g. what an AI/agent produces while
+working). Push a file, get a browser-viewable URL served as a GitHub Actions
+**artifact preview**. Most of it is meant to vanish — branches disappear after
+**90 days**, like a mayfly. The pieces worth keeping can be committed instead.
 
-Short-lived like a mayfly: branches vanish after **90 days**.
+This is **not** a general "paste any HTML" host. It's for HTML that comes out of
+some process, that you want to glance at or share via a URL without it becoming
+part of a codebase you merge.
+
+## Two modes
+
+| | command | lives on | lifespan |
+|---|---|---|---|
+| **Throwaway** (default) | `mayfly push -b <branch> ...` | a throwaway branch | auto-deleted after 90 days |
+| **Keep** (design doc) | `mayfly keep ...` | the default branch | persists until you remove it |
+
+Both upload each `.html` as its own browser-viewable artifact and return the
+preview URLs. (Artifacts themselves always expire after 90 days; `keep` persists
+the *source* so you can always re-preview it.)
 
 ## How it works
 
-1. You push `.html` files to a branch.
+1. You publish `.html` files to a branch (via the CLI or plain git).
 2. The `Preview` workflow uploads each changed `.html` as its own **non-zipped artifact**.
 3. Each file gets a preview URL (also commented on the commit and shown in the run summary).
 4. Open a URL and the file renders directly in your browser.
 
 > GitHub Actions lets you open an artifact uploaded with `actions/upload-artifact@v7` and `archive: false` directly in the browser, but only for formats the browser can render natively (standalone HTML, images, markdown, etc.). This repo relies on that.
 
-## Add it to an existing repo (recommended)
+## Access control
 
-Instead of forking, call mayfly as a **reusable workflow** from a repo you
-already have. Previews then live in that repo and inherit its access
-permissions automatically (private repo => only authenticated collaborators
-can open them). Drop this into `.github/workflows/html-preview.yml`:
+Previews live in this repo as artifacts, so visibility follows the repo's
+settings: make the repo **private** and only authenticated collaborators can
+open the preview URLs.
 
-```yaml
-name: HTML Preview
-on:
-  pull_request:
-    paths: ['**.html']
-jobs:
-  preview:
-    uses: toiroakr/mayfly/.github/workflows/preview.yml@v1
-    permissions:
-      contents: read
-      pull-requests: write
-```
-
-On each PR touching an `.html` file, every changed file is uploaded as a
-browser-viewable artifact and the preview URLs are posted as a single,
-self-updating PR comment. See [`examples/html-preview.yml`](examples/html-preview.yml).
-
-> **Notes**
-> - Do **not** add `cleanup.yml` to a real repo — it deletes branches idle for
->   90 days, which only makes sense for the dedicated-fork model below.
-> - PRs from forks get a read-only token, so commenting won't work for them
->   without `pull_request_target` (which has security trade-offs). Same-repo
->   branches work out of the box.
-
-## Use as a standalone repo (fork model)
-
-**Fork** this repository (or use "Use this template") and use it under your own account.
-
-### `mayfly` CLI
+## CLI
 
 Put `mayfly` on your `PATH`:
 
 ```bash
-# from your clone
 ln -s "$PWD/mayfly" /usr/local/bin/mayfly   # or copy it anywhere on PATH
 ```
 
-Push files and get JSON back (stdout is JSON only, so it pipes into `jq`):
-
 ```bash
-mayfly -b my-page -f page.html -f assets.html
+# throwaway preview (stdout is JSON only, so it pipes into jq)
+mayfly push -b agent-run-42 -f /tmp/report.html
+
+# keep some of them as design docs (committed to the default branch under docs/)
+mayfly keep -p docs -f /tmp/design-v3.html
+
+# clean up a throwaway branch early
+mayfly delete -b agent-run-42
 ```
 
 ```json
 {
-  "branch": { "name": "my-page", "url": "https://github.com/you/mayfly/tree/my-page" },
+  "branch": { "name": "agent-run-42", "url": "https://github.com/you/mayfly/tree/agent-run-42" },
   "files": [
-    { "name": "page.html",   "url": "https://github.com/you/mayfly/actions/runs/123/artifacts/456" },
-    { "name": "assets.html", "url": "https://github.com/you/mayfly/actions/runs/123/artifacts/789" }
+    { "name": "report.html", "url": "https://github.com/you/mayfly/actions/runs/123/artifacts/456" }
   ]
 }
 ```
 
-Delete a branch when you're done:
-
-```bash
-mayfly delete -b my-page
-```
-
-The target repo is resolved from `--repo`, then `$MAYFLY_REPO`, then the repo of
-the current directory (`gh repo view`). Run it inside your fork's clone, or set
-`MAYFLY_REPO=you/mayfly`.
-
-### Plain git
-
-You don't need the CLI — pushing `.html` on any branch works too:
-
-```bash
-git checkout -b my-page
-echo '<!doctype html><h1>hello</h1>' > index.html
-git add index.html && git commit -m "add page" && git push -u origin my-page
-```
-
-## Constraints & notes
-
-- **Only self-contained HTML renders.** Externally linked CSS / JS / images are not resolved, so inline everything (embed `<style>` / `<script>`, use data URIs for images).
-- **URLs change on every push.** Artifacts are numbered per run, so there is no stable URL — you always get the latest preview's URL.
-- **Retention is 90 days** (the artifact default). The `Cleanup stale branches` workflow deletes any branch (other than the default) with no commits in 90 days.
-- **Visibility follows your fork's settings.** To keep previews private, make your fork private.
+The CLI talks to the GitHub API (no local checkout needed), so an agent can call
+it directly. The target repo is resolved from `--repo`, then `$MAYFLY_REPO`,
+then the repo of the current directory (`gh repo view`).
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `mayfly` | CLI: `push` files / `delete` a branch |
+| `mayfly` | CLI: `push` (throwaway) / `keep` (persist) / `delete` |
 | `.github/workflows/preview.yml` | Uploads each pushed `.html` as an artifact and comments the URLs |
-| `.github/workflows/cleanup.yml` | Deletes branches idle for 90 days, daily |
+| `.github/workflows/cleanup.yml` | Deletes branches idle for 90 days, daily (default branch is never touched) |
