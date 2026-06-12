@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '**.html'
+      - '!docs/**'   # docs/ is published via Pages (pages.yml), not artifact previews
 
 permissions:
   contents: read
