@@ -93,7 +93,7 @@ publish() {
   TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
 
   local TREE_ENTRIES="" USED="" path base dest stem ext n blob
-  local DESTLIST=()
+  local DESTLIST=() SRCLIST=()
   for path in "$@"; do
     [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
     base="$(basename "$path")"
@@ -106,7 +106,7 @@ publish() {
     while case " $USED " in *" $dest "*) true;; *) false;; esac; do
       n=$((n + 1)); dest="$stem-$n$ext"
     done
-    USED="$USED $dest"; DESTLIST+=("$dest")
+    USED="$USED $dest"; DESTLIST+=("$dest"); SRCLIST+=("$path")
     { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
     blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
     TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$dest\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
@@ -138,8 +138,9 @@ publish() {
     ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
   fi
 
-  local FILES_JSON="" dest id url urljson entry
-  for dest in "${DESTLIST[@]}"; do
+  local FILES_JSON="" i dest src id url urljson entry
+  for i in "${!DESTLIST[@]}"; do
+    dest="${DESTLIST[$i]}"; src="${SRCLIST[$i]}"
     id="$(printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$dest" '$1==n{print $2; exit}')"
     if [ -n "$id" ]; then
       url="https://github.com/$REPO/actions/runs/$RUN_ID/artifacts/$id"
@@ -148,7 +149,7 @@ publish() {
     else
       urljson="null"
     fi
-    entry="    { \"name\": \"$(json_escape "$dest")\", \"url\": $urljson }"
+    entry="    { \"source\": \"$(json_escape "$src")\", \"name\": \"$(json_escape "$dest")\", \"url\": $urljson }"
     FILES_JSON="${FILES_JSON:+$FILES_JSON,
 }$entry"
   done
