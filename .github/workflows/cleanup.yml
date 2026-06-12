@@ -1,0 +1,37 @@
+name: Cleanup stale branches
+
+# Delete branches with no commits for 90 days.
+# Matched to the Actions artifact default retention (90 days), so this
+# cleans up the "empty shell" branches left after their artifacts expire.
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 毎日 00:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      STALE_DAYS: '90'
+    steps:
+      - name: Delete branches with no commits in STALE_DAYS
+        run: |
+          set -euo pipefail
+          CUTOFF=$(date -u -d "$STALE_DAYS days ago" +%s)
+
+          gh api "repos/$REPO/branches" --paginate -q '.[].name' | while IFS= read -r b; do
+            [ "$b" = "$DEFAULT_BRANCH" ] && continue
+            DATE=$(gh api "repos/$REPO/commits/$b" -q '.commit.committer.date')
+            TS=$(date -u -d "$DATE" +%s)
+            if [ "$TS" -lt "$CUTOFF" ]; then
+              echo "Deleting stale branch: $b (last commit $DATE)"
+              gh api -X DELETE "repos/$REPO/git/refs/heads/$b"
+            fi
+          done

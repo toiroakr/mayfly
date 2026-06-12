@@ -1,0 +1,78 @@
+name: Preview
+
+on:
+  push:
+    paths:
+      - '**.html'
+
+permissions:
+  contents: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed HTML files
+        id: collect
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BEFORE_SHA" ] \
+             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            # New branch or shallow history: target all .html files
+            CHANGED=$(git ls-files '*.html')
+          else
+            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
+          fi
+
+          mkdir -p out
+          COUNT=0
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            mkdir -p "out/$(dirname "$f")"
+            cp "$f" "out/$f"
+            COUNT=$((COUNT + 1))
+          done <<< "$CHANGED"
+
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Collected $COUNT HTML file(s)."
+
+      - name: Upload preview artifact
+        id: upload
+        if: steps.collect.outputs.count != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: preview
+          path: out/
+          archive: false
+
+      - name: Report preview URL
+        if: steps.collect.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### 🦋 mayfly preview"
+            echo ""
+            echo "🔗 $ARTIFACT_URL"
+            echo ""
+            echo "_Open the artifact page above and click an \`.html\` file to view it in the browser._"
+            echo "_This artifact expires in 90 days._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          BODY="🦋 **Preview:** $ARTIFACT_URL
+
+          Open the artifact page and click an \`.html\` file to view it in the browser. Expires in 90 days."
+
+          gh api "repos/$REPO/commits/$SHA/comments" -f body="$BODY"
