@@ -120,7 +120,6 @@
         var crumbs = document.getElementById('crumbs');
         var pages = [];
         var current = null;        // current page path, or null
-        var ORDER = ['getting-started', 'concepts', 'commands', 'workflows'];
         var THEME_KEY = 'mayfly-theme';
 
         /* ---- theme ---- */
@@ -145,9 +144,12 @@
 
         /* ---- helpers ---- */
         function closeNav() { document.body.classList.remove('nav-open'); }
-        function sectionLabel(seg) { return seg.replace(/-/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
+        function stripNum(s) { return s.replace(/^\d+[_-]/, ''); }
+        function prettyPath(path) { return path.split('/').map(stripNum).join('/'); }
+        function byPath(a, b) { return a.path.localeCompare(b.path); }
+        function sectionLabel(seg) { return stripNum(seg).replace(/-/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
         function sectionsList() { var s = []; pages.forEach(function (p) { var g = p.path.split('/')[0]; if (s.indexOf(g) < 0) s.push(g); }); return s; }
-        function pagesIn(seg) { return pages.filter(function (p) { return p.path.split('/')[0] === seg; }); }
+        function pagesIn(seg) { return pages.filter(function (p) { return p.path.split('/')[0] === seg; }).sort(byPath); }
 
         function setCrumbs(parts) {
           crumbs.innerHTML = '';
@@ -168,12 +170,12 @@
         function showSection(seg) {
           current = null; about.hidden = true; frame.hidden = true; frame.removeAttribute('src'); sectionPanel.hidden = false;
           var items = pagesIn(seg);
-          sectionPanel.innerHTML = '<h1>' + sectionLabel(seg) + '</h1><p class="muted">' + items.length + ' page' + (items.length === 1 ? '' : 's') + ' in <code>' + seg + '/</code></p>';
+          sectionPanel.innerHTML = '<h1>' + sectionLabel(seg) + '</h1><p class="muted">' + items.length + ' page' + (items.length === 1 ? '' : 's') + ' in <code>' + prettyPath(seg) + '/</code></p>';
           var ul = document.createElement('ul'); ul.className = 'cards';
           items.forEach(function (p) {
             var li = document.createElement('li'); var a = document.createElement('a'); a.href = '#' + p.path;
             a.innerHTML = '<span class="t"></span><span class="p"></span>';
-            a.querySelector('.t').textContent = p.title; a.querySelector('.p').textContent = p.path;
+            a.querySelector('.t').textContent = p.title; a.querySelector('.p').textContent = prettyPath(p.path);
             a.addEventListener('click', function (e) { e.preventDefault(); open(p); });
             li.appendChild(a); ul.appendChild(li);
           });
@@ -197,12 +199,11 @@
           if (!shown.length) { var d = document.createElement('div'); d.className = 'empty'; d.textContent = pages.length ? 'No matches.' : 'No pages yet.'; list.appendChild(d); return; }
           var groups = {};
           shown.forEach(function (p) { var s = p.path.split('/')[0]; (groups[s] = groups[s] || []).push(p); });
-          Object.keys(groups).sort(function (a, b) { var ia = ORDER.indexOf(a), ib = ORDER.indexOf(b); if (ia < 0) ia = 99; if (ib < 0) ib = 99; return ia - ib || a.localeCompare(b); })
-            .forEach(function (s) {
+          Object.keys(groups).sort().forEach(function (s) {
               var h = document.createElement('li'); h.className = 'section';
-              var hb = document.createElement('button'); hb.textContent = sectionLabel(s); hb.title = 'List ' + s + '/';
+              var hb = document.createElement('button'); hb.textContent = sectionLabel(s); hb.title = 'List ' + prettyPath(s) + '/';
               hb.addEventListener('click', function () { showSection(s); }); h.appendChild(hb); list.appendChild(h);
-              groups[s].forEach(function (p) {
+              groups[s].sort(byPath).forEach(function (p) {
                 var li = document.createElement('li'); var a = document.createElement('a'); a.href = '#' + p.path; a.title = p.path;
                 if (current === p.path) a.className = 'active';
                 var t = document.createElement('span'); t.textContent = p.title; a.appendChild(t);
