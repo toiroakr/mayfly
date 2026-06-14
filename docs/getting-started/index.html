@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Getting started</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      pre { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow: auto; }
+      pre code { background: none; padding: 0; color: inherit; }
+      a { color: #0969da; } .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1>Getting started</h1>
+    <p class="muted">mayfly needs the <a href="https://cli.github.com/">GitHub CLI</a> (<code>gh</code>), authenticated, on your PATH. It talks to the GitHub API directly — no local clone is required.</p>
+
+    <h2>1. Create a repo from the template</h2>
+    <p>mayfly is a template repository.</p>
+    <pre><code>gh repo create my-previews --template &lt;owner&gt;/mayfly --private</code></pre>
+    <p>For access-controlled previews, make it <strong>private</strong> (or <strong>internal</strong>) inside a <strong>GitHub Enterprise Cloud</strong> org.</p>
+
+    <h2>2. Put the CLI on your PATH</h2>
+    <pre><code>ln -s "$PWD/mayfly" /usr/local/bin/mayfly</code></pre>
+
+    <h2>3. Enable GitHub Pages (for keep)</h2>
+    <pre><code>gh api -X POST repos/&lt;owner&gt;/my-previews/pages -f build_type=workflow</code></pre>
+    <p>On Enterprise, set Settings → Pages → Visibility → <strong>Private</strong> so kept pages are restricted to people with repo access.</p>
+
+    <h2>4. Use it</h2>
+    <pre><code># throwaway preview
+mayfly push -f /tmp/report.html
+
+# keep a page (opens a PR; merge publishes it to Pages)
+mayfly keep -p design/index.html -f /tmp/design.html</code></pre>
+    <p class="muted">Target repo resolution: <code>--repo</code> &gt; <code>$MAYFLY_REPO</code> &gt; the current directory's repo.</p>
+  </body>
+</html>

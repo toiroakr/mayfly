@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Workflows</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      table { border-collapse: collapse; margin: 1rem 0; } th, td { border: 1px solid #d0d7de; padding: .45rem .8rem; text-align: left; vertical-align: top; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1>Workflows</h1>
+    <p class="muted">The repo ships five GitHub Actions workflows. All are hand-written, pin actions by commit SHA, use <code>persist-credentials: false</code>, and request least-privilege permissions.</p>
+    <table>
+      <tr><th>Workflow</th><th>Trigger</th><th>Does</th></tr>
+      <tr><td><code>preview.yml</code></td><td>push of <code>**.html</code> (excl. <code>docs/**</code>)</td><td>detect changed HTML → upload each as an artifact → comment the URLs on the commit</td></tr>
+      <tr><td><code>keep-preview.yml</code></td><td>PR touching <code>docs/**.html</code></td><td>build a preview of the kept page and comment it on the PR before merge</td></tr>
+      <tr><td><code>pages.yml</code></td><td>push to default branch under <code>docs/**</code></td><td>generate <code>pages.json</code> (the doc index) and publish <code>docs/</code> to GitHub Pages</td></tr>
+      <tr><td><code>cleanup.yml</code></td><td>daily schedule</td><td>delete <code>preview/*</code> branches idle for 90 days (default branch untouched)</td></tr>
+      <tr><td><code>zizmor.yml</code></td><td>push/PR touching workflows</td><td>static security analysis of the workflows themselves (<a href="https://github.com/zizmorcore/zizmor">zizmor</a>)</td></tr>
+    </table>
+    <p class="muted">An integrated repo (via <code>mayfly integrate</code>) gets trimmed variants: <code>mayfly-preview.yml</code> (push to <code>mayfly/*</code>) and <code>mayfly-cleanup.yml</code>.</p>
+  </body>
+</html>

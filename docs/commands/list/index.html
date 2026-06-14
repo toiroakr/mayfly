@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>list</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      pre { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow: auto; }
+      pre code { background: none; padding: 0; color: inherit; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1><code>mayfly list</code></h1>
+    <p class="muted">List the live throwaway previews (the <code>preview/*</code> branches) with their latest run and per-file URLs.</p>
+    <pre><code>mayfly list</code></pre>
+
+    <h2>Output</h2>
+    <pre><code>{
+  "previews": [
+    {
+      "branch": "preview/20260612-...",
+      "updated": "2026-06-12T06:35:05Z",
+      "run": ".../actions/runs/123",
+      "files": [ { "name": "report.html", "url": ".../artifacts/456" } ]
+    }
+  ]
+}</code></pre>
+    <p class="muted">Useful for seeing what's still alive before it expires, or for re-opening a preview URL.</p>
+  </body>
+</html>

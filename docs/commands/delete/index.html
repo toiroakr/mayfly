@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>delete</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      pre { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow: auto; }
+      pre code { background: none; padding: 0; color: inherit; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1><code>mayfly delete</code></h1>
+    <p class="muted">Delete preview branches early (they would otherwise auto-expire after 90 days).</p>
+    <pre><code>mayfly delete -b &lt;branch&gt; [-b &lt;branch&gt; ...]
+mayfly delete --all-previews</code></pre>
+
+    <h2>Behaviour</h2>
+    <ul>
+      <li><code>-b</code> is repeatable to delete several branches at once.</li>
+      <li><code>--all-previews</code> deletes every <code>preview/*</code> branch.</li>
+      <li>The default branch is always refused.</li>
+    </ul>
+
+    <h2>Output</h2>
+    <pre><code>{ "deleted": ["preview/20260612-...", "preview/20260613-..."] }</code></pre>
+  </body>
+</html>

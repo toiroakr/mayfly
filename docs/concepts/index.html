@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Concepts</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      table { border-collapse: collapse; margin: 1rem 0; } th, td { border: 1px solid #d0d7de; padding: .45rem .8rem; text-align: left; }
+      a { color: #0969da; } .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1>Concepts</h1>
+
+    <h2>Two modes</h2>
+    <table>
+      <tr><th>Mode</th><th>Command</th><th>Mechanism</th><th>Lifespan</th></tr>
+      <tr><td>Throwaway</td><td><code>mayfly push</code></td><td>each HTML uploaded as a browser-viewable artifact on a <code>preview/*</code> branch</td><td>auto-deleted after 90 days</td></tr>
+      <tr><td>Keep</td><td><code>mayfly keep</code></td><td>opens a PR placing the file under <code>docs/&lt;path&gt;</code>; merging publishes it to GitHub Pages</td><td>persists, stable URL</td></tr>
+    </table>
+
+    <h2>Why artifacts</h2>
+    <p>GitHub Actions can open an artifact uploaded with <code>actions/upload-artifact@v7</code> and <code>archive: false</code> directly in the browser — but only formats the browser renders natively (standalone HTML, images, markdown). So previews must be <strong>self-contained HTML</strong>: inline your CSS/JS, use data URIs for images.</p>
+    <p>A non-zipped artifact is keyed by its file <em>basename</em>, so mayfly renames same-named files (<code>a.html</code>, <code>a-2.html</code>) to keep them distinct.</p>
+
+    <h2>Lifespan & cleanup</h2>
+    <p>Artifacts expire after <strong>90 days</strong> (the GitHub default). A daily workflow deletes <code>preview/*</code> branches idle for 90 days, matched to that retention. Hand-made branches are never touched.</p>
+
+    <h2>Access control</h2>
+    <p>Previews and the Pages site live in <em>your</em> repo, so visibility follows the repo. Make it private (Enterprise: set Pages visibility to private) and only authenticated collaborators can open the URLs.</p>
+
+    <h2>URLs are not stable (artifacts)</h2>
+    <p>An artifact preview URL contains the run and artifact ids, both minted per run — so re-pushing yields a new URL. <code>keep</code> → Pages is the way to a stable URL.</p>
+  </body>
+</html>

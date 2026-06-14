@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>push</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      pre { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow: auto; }
+      pre code { background: none; padding: 0; color: inherit; }
+      table { border-collapse: collapse; margin: 1rem 0; } th, td { border: 1px solid #d0d7de; padding: .45rem .8rem; text-align: left; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1><code>mayfly push</code></h1>
+    <p class="muted">Publish files as throwaway browser-viewable previews and print their URLs as JSON.</p>
+    <pre><code>mayfly push [-b &lt;branch&gt;] -f &lt;file&gt; [-f &lt;file&gt; ...] [--open]</code></pre>
+
+    <h2>Behaviour</h2>
+    <ul>
+      <li>Commits the files in one commit to a branch (auto-generated <code>preview/&lt;ts&gt;-&lt;rnd&gt;</code> if <code>-b</code> is omitted), via the GitHub API.</li>
+      <li>The <code>Preview</code> workflow uploads each file as its own <code>archive: false</code> artifact.</li>
+      <li>mayfly waits for the run, then maps each file to its artifact URL.</li>
+      <li>Same-basename files are renamed (<code>a.html</code> → <code>a-2.html</code>) so each stays distinct.</li>
+    </ul>
+
+    <h2>Options</h2>
+    <table>
+      <tr><th>Flag</th><th>Meaning</th></tr>
+      <tr><td><code>-b, --branch</code></td><td>Target branch (reuse to update the same preview)</td></tr>
+      <tr><td><code>-f, --file</code></td><td>File to publish (repeatable)</td></tr>
+      <tr><td><code>--open</code></td><td>Open the first preview URL in your browser</td></tr>
+      <tr><td><code>-m, --message</code></td><td>Commit message</td></tr>
+      <tr><td><code>-r, --repo</code></td><td>Target repo <code>owner/name</code></td></tr>
+    </table>
+
+    <h2>Output</h2>
+    <pre><code>{
+  "branch": { "name": "preview/...", "url": ".../tree/preview/..." },
+  "files": [
+    { "source": "/tmp/report.html", "name": "report.html", "url": ".../artifacts/456" }
+  ]
+}</code></pre>
+    <p class="muted">stdout is JSON only; progress goes to stderr, so <code>mayfly push -f x.html | jq</code> works. For fire-and-forget, background it: <code>mayfly push -f x.html &gt; out.json 2&gt;/dev/null &amp;</code>.</p>
+  </body>
+</html>

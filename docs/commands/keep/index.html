@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>keep</title>
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.65; color: #1b1f24; background: #fff; margin: 0; padding: 2.2rem clamp(1rem,5vw,3.5rem); max-width: 52rem; }
+      h1 { margin: .2rem 0 1rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #eaecef; padding-bottom: .3rem; }
+      code { background: #f3f4f6; padding: .12em .4em; border-radius: 5px; font-size: .9em; }
+      pre { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow: auto; }
+      pre code { background: none; padding: 0; color: inherit; }
+      table { border-collapse: collapse; margin: 1rem 0; } th, td { border: 1px solid #d0d7de; padding: .45rem .8rem; text-align: left; }
+      .muted { color: #57606a; }
+    </style>
+  </head>
+  <body>
+    <h1><code>mayfly keep</code></h1>
+    <p class="muted">Promote a page from throwaway to permanent: open a PR that places it under <code>docs/&lt;path&gt;</code>; merging publishes it to GitHub Pages at a stable URL.</p>
+    <pre><code>mayfly keep -p &lt;path&gt; -f &lt;file&gt; [-b &lt;branch&gt;] [--open]</code></pre>
+
+    <h2>Behaviour</h2>
+    <ul>
+      <li>Creates a <code>keep/*</code> branch off the default branch, places the file at <code>docs/&lt;path&gt;</code>, and opens a PR — it does <strong>not</strong> commit to the default branch directly, so the change goes through review.</li>
+      <li>The <code>Keep preview</code> workflow comments a preview of the page on the PR, so reviewers see it before merge.</li>
+      <li>Merging the PR triggers the <code>Pages</code> workflow, publishing <code>docs/</code>.</li>
+    </ul>
+
+    <h2>Source</h2>
+    <p>A local file (<code>-f path</code>), or a file already on a preview branch (<code>-b &lt;branch&gt; -f &lt;name-on-branch&gt;</code>).</p>
+
+    <h2>Options</h2>
+    <table>
+      <tr><th>Flag</th><th>Meaning</th></tr>
+      <tr><td><code>-p, --path</code></td><td>Destination under <code>docs/</code> (= the Pages URL path)</td></tr>
+      <tr><td><code>-f, --file</code></td><td>Source file (local, or name on <code>-b</code>)</td></tr>
+      <tr><td><code>-b, --branch</code></td><td>Source preview branch (optional)</td></tr>
+      <tr><td><code>--open</code></td><td>Open the PR in your browser</td></tr>
+    </table>
+
+    <h2>Output</h2>
+    <pre><code>{
+  "pr": { "url": ".../pull/7", "number": 7 },
+  "path": "docs/design/index.html",
+  "pages_path": "design/index.html",
+  "branch": { "name": "keep/...", "url": ".../tree/keep/..." }
+}</code></pre>
+  </body>
+</html>
