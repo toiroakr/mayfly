@@ -129,7 +129,7 @@ publish() {
     gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$NEW_COMMIT" >/dev/null
     echo "$PROG: committed ${#DESTLIST[@]} file(s) to $REPO@$BRANCH ($NEW_COMMIT)" >&2
 
-    echo -n "$PROG: waiting for workflow run" >&2
+    echo -n "$PROG: waiting for the workflow to start" >&2
     for i in $(seq 1 40); do
       RUN_ID="$(gh api "repos/$REPO/actions/runs?head_sha=$NEW_COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
       [ -n "$RUN_ID" ] && break
@@ -137,7 +137,9 @@ publish() {
     done
     echo >&2
     [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
-    gh run watch "$RUN_ID" -R "$REPO" --exit-status >/dev/null 2>&1 || \
+    # Live job/step progress to stderr (stdout stays JSON-only).
+    echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RUN_ID" >&2
+    gh run watch "$RUN_ID" -R "$REPO" --interval 2 --exit-status 1>&2 || \
       echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
     ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
   fi
@@ -578,7 +580,8 @@ for i in $(seq 1 40); do
 done
 echo >&2
 [ -n "$RID" ] || die "timed out finding workflow run (is mayfly-preview.yml pushed?)"
-gh run watch "$RID" -R "$REPO" --exit-status >/dev/null 2>&1 || echo "$PROG: warning: run did not complete cleanly" >&2
+echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RID" >&2
+gh run watch "$RID" -R "$REPO" --interval 2 --exit-status 1>&2 || echo "$PROG: warning: run did not complete cleanly" >&2
 ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
 
 PREVIEW="$TMPD/preview.md"
