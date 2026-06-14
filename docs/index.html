@@ -3,31 +3,120 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>🦋 mayfly — kept previews</title>
+    <title>🦋 mayfly</title>
     <style>
-      :root { color-scheme: light dark; }
-      body {
-        margin: 0; min-height: 100vh; display: grid; place-items: center;
-        font-family: system-ui, sans-serif;
-        background: radial-gradient(circle at 50% 30%, #2a3b5e, #0d1117);
-        color: #e6edf3;
-      }
-      main { text-align: center; max-width: 36rem; padding: 2rem; }
-      h1 { font-size: 3rem; margin: 0 0 .5rem; }
-      p { opacity: .8; line-height: 1.6; }
-      code { background: rgba(255,255,255,.1); padding: .15em .4em; border-radius: 4px; }
+      :root { color-scheme: light dark; --bg: #0d1117; --panel: #161b22; --fg: #e6edf3; --muted: #8b949e; --accent: #6e9bff; --line: #30363d; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body { display: flex; font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+
+      aside { width: 300px; flex: none; border-right: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
+      .brand { font-size: 1.4rem; font-weight: 700; padding: 1rem 1rem .5rem; }
+      .search { padding: 0 1rem .75rem; }
+      .search input { width: 100%; padding: .5rem .6rem; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+      #list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; }
+      #list li a { display: block; padding: .55rem 1rem; color: var(--fg); text-decoration: none; border-left: 3px solid transparent; }
+      #list li a small { display: block; color: var(--muted); font-size: .72rem; }
+      #list li a:hover { background: rgba(255,255,255,.05); }
+      #list li a.active { border-left-color: var(--accent); background: rgba(110,155,255,.12); }
+      .empty { padding: .75rem 1rem; color: var(--muted); font-size: .85rem; }
+
+      main { flex: 1; position: relative; }
+      iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+      #about { position: absolute; inset: 0; overflow: auto; padding: 3rem clamp(1.5rem, 6vw, 5rem); }
+      #about h1 { font-size: 3rem; margin: 0 0 .25rem; }
+      #about p { line-height: 1.7; max-width: 42rem; color: var(--fg); }
+      #about .muted { color: var(--muted); }
+      #about code { background: rgba(255,255,255,.08); padding: .12em .4em; border-radius: 5px; }
+      #about table { border-collapse: collapse; margin: 1rem 0; }
+      #about td, #about th { border: 1px solid var(--line); padding: .4rem .7rem; text-align: left; }
     </style>
   </head>
   <body>
+    <aside>
+      <div class="brand">🦋 mayfly</div>
+      <div class="search"><input id="q" type="search" placeholder="Search pages…" autocomplete="off" /></div>
+      <ul id="list"></ul>
+    </aside>
+
     <main>
-      <h1>🦋 mayfly</h1>
-      <p>This is the GitHub Pages root for kept previews.</p>
-      <p>
-        Throwaway previews live as ephemeral artifacts (<code>mayfly push</code>).
-        The ones worth keeping are promoted here via <code>mayfly keep</code>,
-        which opens a PR placing them under <code>docs/&lt;path&gt;</code> — once merged,
-        each is reachable at a stable URL on this site.
-      </p>
+      <section id="about">
+        <h1>🦋 mayfly</h1>
+        <p class="muted">A throwaway home for generated HTML — what an AI/agent produces while working.</p>
+        <p>
+          Push a file and get a browser-viewable URL served as a GitHub Actions
+          <strong>artifact preview</strong>. Most of it is meant to vanish — preview
+          branches disappear after <strong>90 days</strong>, like a mayfly. The pieces
+          worth keeping are promoted here, to this GitHub Pages site, at a stable URL.
+        </p>
+        <table>
+          <tr><th>Mode</th><th>Command</th><th>Lives</th></tr>
+          <tr><td>Throwaway</td><td><code>mayfly push</code></td><td>artifact, gone in 90 days</td></tr>
+          <tr><td>Keep</td><td><code>mayfly keep</code></td><td>here, on Pages (stable)</td></tr>
+        </table>
+        <p class="muted">← Kept pages are listed on the left. Use the search box to filter, and click one to open it here.</p>
+      </section>
+      <iframe id="frame" title="preview" hidden></iframe>
     </main>
+
+    <script>
+      (function () {
+        var list = document.getElementById('list');
+        var q = document.getElementById('q');
+        var about = document.getElementById('about');
+        var frame = document.getElementById('frame');
+        var pages = [];
+        var current = null;
+
+        function open(p) {
+          current = p;
+          about.hidden = true;
+          frame.hidden = false;
+          frame.src = p.path;
+          if (location.hash.slice(1) !== p.path) history.replaceState(null, '', '#' + p.path);
+          render(q.value);
+        }
+
+        function render(filter) {
+          var f = (filter || '').trim().toLowerCase();
+          list.innerHTML = '';
+          var shown = pages.filter(function (p) {
+            return !f || (p.title + ' ' + p.path).toLowerCase().indexOf(f) !== -1;
+          });
+          if (!shown.length) {
+            var d = document.createElement('div');
+            d.className = 'empty';
+            d.textContent = pages.length ? 'No matches.' : 'No kept pages yet.';
+            list.appendChild(d);
+            return;
+          }
+          shown.forEach(function (p) {
+            var li = document.createElement('li');
+            var a = document.createElement('a');
+            a.href = '#' + p.path;
+            a.title = p.path;
+            if (current && current.path === p.path) a.className = 'active';
+            var t = document.createElement('span'); t.textContent = p.title;
+            var s = document.createElement('small'); s.textContent = p.path;
+            a.appendChild(t); a.appendChild(s);
+            a.addEventListener('click', function (e) { e.preventDefault(); open(p); });
+            li.appendChild(a); list.appendChild(li);
+          });
+        }
+
+        q.addEventListener('input', function () { render(q.value); });
+
+        fetch('pages.json')
+          .then(function (r) { return r.ok ? r.json() : []; })
+          .then(function (data) {
+            pages = Array.isArray(data) ? data : [];
+            render('');
+            var h = decodeURIComponent(location.hash.slice(1));
+            var m = pages.filter(function (p) { return p.path === h; })[0];
+            if (m) open(m);
+          })
+          .catch(function () { render(''); });
+      })();
+    </script>
   </body>
 </html>
