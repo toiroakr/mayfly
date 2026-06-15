@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>🦋 mayfly — docs</title>
+    <title>mayfly — docs</title>
+    <link rel="icon" type="image/svg+xml" href="mayfly.svg" />
     <script>try{var t=localStorage.getItem("mayfly-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
     <style>
       :root { color-scheme: light dark;
@@ -17,6 +18,7 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; }
       body { display: flex; flex-direction: column; font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+      .logo { height: 1em; width: auto; vertical-align: -0.18em; margin-right: .32em; }
 
       .topbar { display: flex; align-items: center; gap: .4rem; padding: .55rem .8rem; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 40; }
       .topbar #menu, .themebtn { background: none; border: 0; color: var(--fg); font-size: 1.2rem; line-height: 1; padding: .2rem .5rem; cursor: pointer; border-radius: 6px; }
@@ -70,7 +72,7 @@
   <body>
     <header class="topbar">
       <button id="menu" aria-label="Toggle sidebar">☰</button>
-      <span class="t-brand">🦋 mayfly</span>
+      <span class="t-brand"><img class="logo" src="mayfly.svg" alt="" />mayfly</span>
       <button class="themebtn" data-theme-toggle aria-label="Theme">🖥</button>
     </header>
 
@@ -85,7 +87,7 @@
         <nav class="crumbs" id="crumbs"></nav>
         <div class="view">
           <section class="panel" id="about">
-            <h1>🦋 mayfly</h1>
+            <h1><img class="logo" src="mayfly.svg" alt="" />mayfly</h1>
             <p class="muted">Ephemeral HTML hosting via GitHub Actions artifact previews — and this documentation site is hosted by mayfly itself.</p>
             <p>mayfly gives generated HTML (e.g. what an AI/agent produces) a browser-viewable URL without it becoming part of a codebase you merge. Throwaway previews live as artifacts that vanish after <strong>90 days</strong>; the pieces worth keeping are promoted to GitHub Pages — like the pages of this very site.</p>
             <table>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="149 58 840 840" width="840" height="840" role="img" aria-labelledby="t d">
+  <title id="t">Geometric mayfly icon</title>
+  <desc id="d">A monochrome geometric mayfly-inspired icon with transparent background.</desc>
+  <g fill="#7775ff">
+    <polygon points="222,568 298,560 634,708 620,724 396,686 258,650"/>
+    <polygon fill="#9891ff" points="367,540 402,439 576,173 732,105 678,370"/>
+    <polygon fill="#9891ff" points="455,521 712,381 610,565 448,594"/>
+    <polygon points="621,725 615,711 898,628"/>
+    <polygon points="617,722 619,711 916,759"/>
+    <polygon points="613,722 623,712 836,852"/>
+  </g>
+</svg>
