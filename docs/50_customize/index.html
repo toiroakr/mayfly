@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Customize</title>
+    <link rel="stylesheet" href="../doc.css" />
+    <script>try{var t=localStorage.getItem("mayfly-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
+  </head>
+  <body>
+    <h1>Customize</h1>
+
+    <h2>The publish directory (<code>docs/</code>)</h2>
+    <p>
+      By convention mayfly publishes the GitHub Pages site from <code>docs/</code>, and
+      <code>mayfly keep</code> places kept pages under <code>docs/&lt;path&gt;</code>. The folder name
+      is the <strong>site root</strong> — it does not appear in the URL
+      (<code>docs/index.html</code> → <code>/</code>, <code>docs/commands/push/index.html</code> → <code>/commands/push/</code>).
+    </p>
+    <p>
+      GitHub Pages (Actions deploy) can publish <em>any</em> folder, so the name is free — but it is
+      hardcoded in a few places. To use a different folder (e.g. <code>site/</code>), change <strong>all</strong>
+      of them so they stay in sync:
+    </p>
+    <table>
+      <tr><th>File</th><th>What to change</th></tr>
+      <tr><td><code>mayfly</code></td><td><code>DOCS_DIR="docs"</code> (used by <code>keep</code> to place files)</td></tr>
+      <tr><td><code>.github/workflows/pages.yml</code></td><td>the <code>upload-pages-artifact</code> input <code>path: docs</code>, the trigger <code>on.push.paths: ['docs/**']</code>, and <code>cd docs</code> in the page-index step</td></tr>
+    </table>
+    <p class="muted">
+      If these drift apart, <code>keep</code> writes to one folder while Pages publishes another.
+      (Legacy branch-based Pages only allows <code>/</code> or <code>/docs</code>; the Actions deploy mayfly uses has no such limit.)
+    </p>
+
+    <h2>Page order &amp; structure</h2>
+    <p>
+      The sidebar mirrors the <code>docs/</code> directory. Ordering is driven entirely by
+      <strong>numeric directory prefixes</strong> — e.g. <code>10_getting-started/</code>,
+      <code>30_commands/10_push/</code>. The prefix is stripped for display, so URLs/labels read cleanly.
+    </p>
+    <ul>
+      <li>Use <strong>consistent zero-padded widths</strong> (e.g. all two digits) so they sort correctly.</li>
+      <li>Leave gaps (10, 20, 30…) so you can insert pages later without renumbering.</li>
+      <li>The list comes from <code>pages.json</code>, generated at deploy by <code>pages.yml</code>; each page's label is its <code>&lt;title&gt;</code>.</li>
+    </ul>
+  </body>
+</html>
