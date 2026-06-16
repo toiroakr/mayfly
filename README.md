@@ -1,4 +1,4 @@
-# 🦋 mayfly
+# <img src="docs/mayfly.svg" alt="" height="30" valign="middle"> mayfly
 
 A throwaway home for generated HTML (e.g. what an AI/agent produces while
 working). Push a file, get a browser-viewable URL served as a GitHub Actions
