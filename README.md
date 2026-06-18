@@ -125,7 +125,10 @@ jq -r '.files[0].url' /tmp/r.json
 ```
 
 The CLI talks to the GitHub API (no local checkout), so an agent can call it
-directly. Target repo: `--repo` > `$MAYFLY_REPO` > the current directory's repo.
+directly. Target repo: `--repo` > `$MAYFLY_REPO` > the repo **mayfly itself
+lives in** (resolved from the script's own location, symlinks followed — not
+your current directory), so running it from inside another checkout won't
+hijack the target.
 
 ### Shell completion
 

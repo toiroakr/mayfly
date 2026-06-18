@@ -48,16 +48,32 @@ Options:
       --all-previews    (delete) remove every ${PREVIEW_PREFIX}* branch.
   -h, --help            Show this help.
 
-Repo: --repo > \$MAYFLY_REPO > the current directory's repo (gh repo view).
+Repo: --repo > \$MAYFLY_REPO > the repo mayfly itself lives in (not \$PWD).
 EOF
 }
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# Absolute directory of this script, with symlinks resolved. mayfly is usually
+# symlinked onto PATH, so $PWD is wherever you happen to be — but the repo we
+# want is the one mayfly *lives in*. Anchor detection there, not on $PWD.
+script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src";; esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
 resolve_repo() {
   local r="${REPO_ARG:-${MAYFLY_REPO:-}}"
-  [ -z "$r" ] && r="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-  [ -n "$r" ] || { echo "$PROG: cannot determine repo; set MAYFLY_REPO or use --repo" >&2; exit 1; }
+  # Default to the repo mayfly itself sits in (resolving from its own location,
+  # not $PWD), so running it from inside some other checkout doesn't hijack the
+  # target. --repo and $MAYFLY_REPO still override.
+  [ -z "$r" ] && r="$( (cd "$(script_dir)" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || true)"
+  [ -n "$r" ] || { echo "$PROG: cannot determine repo; set MAYFLY_REPO, use --repo, or run mayfly from inside its repo clone" >&2; exit 1; }
   printf '%s' "$r"
 }
 
@@ -85,10 +101,36 @@ ensure_branch() {
 
 FIRST_URL=""
 
+# `push` only yields a preview if the target repo has the push-triggered preview
+# workflow (.github/workflows/preview.yml). Without it the commit just sits on a
+# dead branch and the run-watch loop times out 2 minutes later. Detect that
+# up front, before committing anything, and explain how to fix it.
+assert_push_capable() {
+  local repo="$1"
+  gh api "repos/$repo/contents/.github/workflows/preview.yml" -q .name >/dev/null 2>&1 && return 0
+  cat >&2 <<EOF
+$PROG: '$repo' is not a mayfly repo — no .github/workflows/preview.yml.
+$PROG: 'push' relies on that workflow to turn the commit into a browser-viewable
+$PROG: artifact; it only exists in repos created from the mayfly template.
+$PROG: nothing was committed. fix one of:
+$PROG:   - point at a mayfly repo:   --repo <owner/name>   or   export MAYFLY_REPO=<owner/name>
+$PROG:   - for an existing repo:     run 'mayfly integrate' there, then preview with
+$PROG:                               '.github/mayfly-preview -f <file> --pr <N>'  (not 'push')
+EOF
+  exit 1
+}
+
 # publish <repo> <branch> <message> <file>...  (files committed at basename, root)
 publish() {
   local REPO="$1" BRANCH="$2" MESSAGE="$3"; shift 3
   FIRST_URL=""
+  assert_push_capable "$REPO"
+  # Validate inputs before creating a branch, so a typo'd path can't leave a
+  # stray empty branch behind.
+  local path
+  for path in "$@"; do
+    [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
+  done
 
   local HEAD_SHA BASE_TREE
   HEAD_SHA="$(ensure_branch "$REPO" "$BRANCH")"
@@ -272,25 +314,37 @@ cmd_list() {
     esac
   done
   local REPO; REPO="$(resolve_repo)"
+  local DEF; DEF="$(gh api "repos/$REPO" -q .default_branch)"
   local branches; branches="$(gh api "repos/$REPO/branches" --paginate -q '.[].name' | grep "^$PREVIEW_PREFIX" || true)"
 
-  local ITEMS="" b date rid run_url arts files_json aname aid fu entry
+  local ITEMS="" b date rid run_url arts changed files_json path aname aid url entry
   while IFS= read -r b; do
     [ -n "$b" ] || continue
     date="$(gh api "repos/$REPO/commits/$b" -q .commit.committer.date 2>/dev/null || true)"
     rid="$(gh api "repos/$REPO/actions/runs?branch=$b&per_page=1" -q '.workflow_runs[0].id // empty' 2>/dev/null || true)"
-    files_json=""
+    # Files pushed onto the branch = what it adds over the default branch.
+    # Artifact name == path with '/'→'_' (see preview.yml); link to the artifact
+    # when the run built one, else to the raw file on the branch so 'list' is
+    # never empty just because the workflow hasn't run (or doesn't exist).
+    changed="$(gh api "repos/$REPO/compare/$DEF...$b" -q '.files[].filename' 2>/dev/null || true)"
     if [ -n "$rid" ]; then
       run_url="\"https://github.com/$REPO/actions/runs/$rid\""
       arts="$(gh api "repos/$REPO/actions/runs/$rid/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
-      while IFS=$'\t' read -r aname aid; do
-        [ -n "$aname" ] || continue
-        fu="https://github.com/$REPO/actions/runs/$rid/artifacts/$aid"
-        files_json="${files_json:+$files_json, }{ \"name\": \"$(json_escape "$aname")\", \"url\": \"$(json_escape "$fu")\" }"
-      done <<< "$arts"
     else
-      run_url="null"
+      run_url="null"; arts=""
     fi
+    files_json=""
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      aname="$(printf '%s' "$path" | tr '/' '_')"
+      aid="$(printf '%s\n' "$arts" | awk -F'\t' -v n="$aname" '$1==n{print $2; exit}')"
+      if [ -n "$aid" ]; then
+        url="https://github.com/$REPO/actions/runs/$rid/artifacts/$aid"
+      else
+        url="https://github.com/$REPO/blob/$b/$path"
+      fi
+      files_json="${files_json:+$files_json, }{ \"name\": \"$(json_escape "$path")\", \"url\": \"$(json_escape "$url")\" }"
+    done <<< "$changed"
     entry="    { \"branch\": \"$(json_escape "$b")\", \"updated\": \"$(json_escape "$date")\", \"run\": $run_url, \"files\": [$files_json] }"
     ITEMS="${ITEMS:+$ITEMS,
 }$entry"
