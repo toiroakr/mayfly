@@ -81,7 +81,21 @@ mayfly is a **template repository**. To run your own:
    **Private**, so kept previews are limited to people with repo access. On
    non-Enterprise accounts, Pages is always public.
 
-4. **Point the CLI at it.** Run `mayfly` from inside the clone, or set
+4. **Allow workflows to write (for the commit comment).** The preview workflow
+   posts the artifact URLs as a commit comment, which needs read/write workflow
+   permissions. Settings → Actions → General → Workflow permissions → **Read and
+   write permissions**. Or:
+   ```bash
+   gh api -X PUT repos/<owner>/my-previews/actions/permissions/workflow \
+     -f default_workflow_permissions=write
+   ```
+   On **private** repos the Actions token may still be barred from commit
+   comments (`Resource not accessible by integration`, HTTP 403) even with this
+   enabled — that's a platform limitation, not a misconfiguration. The workflow
+   treats the comment as **best-effort**, so the preview build still succeeds and
+   the URLs always appear in the CLI's JSON output regardless.
+
+5. **Point the CLI at it.** Run `mayfly` from inside the clone, or set
    `export MAYFLY_REPO=<owner>/my-previews`.
 
 ## CLI
