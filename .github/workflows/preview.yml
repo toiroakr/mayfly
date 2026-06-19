@@ -104,12 +104,10 @@ jobs:
             printf '\nOpen an artifact, then view it in your browser. Expires in 90 days.\n'
           } > "$BODY"
           # Best-effort: the commit comment is a convenience (the CLI already
-          # prints the URLs to stdout). On private repos the Actions token is
-          # often barred from commit comments ("Resource not accessible by
-          # integration", HTTP 403) even with contents:write — don't let that
-          # fail the whole preview build.
+          # prints the URLs to stdout), so don't let a comment failure fail the
+          # whole preview build.
           if gh api "repos/$REPO/commits/$SHA/comments" -F "body=@$BODY" >/dev/null 2>&1; then
             echo "mayfly: posted preview URLs as a commit comment"
           else
-            echo "mayfly: note: could not post the commit comment (the Actions token lacks commit-comment write on this repo — common on private repos); the preview artifacts are unaffected and the URLs are in the CLI output." >&2
+            echo "mayfly: note: could not post the commit comment; the preview artifacts are unaffected and the URLs are in the CLI output." >&2
           fi

@@ -23,12 +23,7 @@
     <pre><code>gh api -X POST repos/&lt;owner&gt;/my-previews/pages -f build_type=workflow</code></pre>
     <p>On Enterprise, set Settings → Pages → Visibility → <strong>Private</strong> so kept pages are restricted to people with repo access.</p>
 
-    <h2>4. Allow workflows to write (for the commit comment)</h2>
-    <p>The preview workflow posts the artifact URLs as a commit comment, which needs read/write workflow permissions (Settings → Actions → General → Workflow permissions → <strong>Read and write permissions</strong>).</p>
-    <pre><code>gh api -X PUT repos/&lt;owner&gt;/my-previews/actions/permissions/workflow -f default_workflow_permissions=write</code></pre>
-    <p class="muted">On <strong>private</strong> repos the Actions token may still be barred from commit comments (<code>Resource not accessible by integration</code>, HTTP 403) even with this enabled — a platform limitation. The comment is <strong>best-effort</strong>, so the build still succeeds and the URLs always appear in the CLI output.</p>
-
-    <h2>5. Use it</h2>
+    <h2>4. Use it</h2>
     <pre><code># throwaway preview
 mayfly push -f /tmp/report.html
 
