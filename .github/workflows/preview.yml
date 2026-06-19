@@ -79,7 +79,8 @@ jobs:
     if: needs.detect.outputs.files != '[]'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write   # post the commit comment
+      actions: read      # list this run's artifacts (private repos enforce this)
     steps:
       - name: Comment preview URLs on the commit
         env:
