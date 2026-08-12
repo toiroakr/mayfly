@@ -19,7 +19,7 @@ jobs:
     outputs:
       files: ${{ steps.collect.outputs.files }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -49,13 +49,26 @@ jobs:
       matrix:
         file: ${{ fromJSON(needs.detect.outputs.files) }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: name
         env:
           FILE: ${{ matrix.file }}
         run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+      # Artifact previews are served without a charset header; inject
+      # <meta charset="utf-8"> into the uploaded copy when the file has no
+      # declaration in its first 1024 bytes (see preview.yml for details).
+      - name: Ensure charset declaration
+        env:
+          FILE: ${{ matrix.file }}
+        run: |
+          set -euo pipefail
+          if ! head -c 1024 "$FILE" | grep -qi 'charset='; then
+            perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
+                               or s/\A/<meta charset="utf-8">\n/' "$FILE"
+            echo "mayfly: injected <meta charset=\"utf-8\"> into $FILE"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.name.outputs.name }}

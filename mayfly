@@ -515,6 +515,19 @@ jobs:
         env:
           FILE: ${{ matrix.file }}
         run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+      # Artifact previews are served without a charset header; inject
+      # <meta charset="utf-8"> into the uploaded copy when the file has no
+      # declaration in its first 1024 bytes.
+      - name: Ensure charset declaration
+        env:
+          FILE: ${{ matrix.file }}
+        run: |
+          set -euo pipefail
+          if ! head -c 1024 "$FILE" | grep -qi 'charset='; then
+            perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
+                               or s/\A/<meta charset="utf-8">\n/' "$FILE"
+            echo "mayfly: injected <meta charset=\"utf-8\"> into $FILE"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.name.outputs.name }}
