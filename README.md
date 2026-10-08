@@ -85,7 +85,7 @@ mayfly is a **template repository**. To run your own:
    `export MAYFLY_REPO=<owner>/my-previews`.
 
 No repo permission tweaks are needed: each workflow requests the scopes it needs
-in its own `permissions:` block (the preview comment job, for instance, takes
+in its own `permissions:` block (the preview job, for instance, takes
 `contents: write` to comment plus `actions: read` to list the run's artifacts —
 private repos enforce the latter), which applies regardless of the repo's
 default workflow-permission setting.
