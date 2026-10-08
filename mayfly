@@ -554,28 +554,40 @@ jobs:
   preview:
     runs-on: ubuntu-latest
     steps:
+      # Depth 2 holds the head commit's parent, which is the "before" of a push
+      # that adds one commit. A wider push fetches its "before" below.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          fetch-depth: 2
           persist-credentials: false
       - id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          # Keep equal to the number of upload steps below.
           SLOTS: '10'
         run: |
           set -euo pipefail
+          # git diff, not the compare API: that API stops listing files at 300,
+          # which would silently drop previews of the HTML files after them.
           # An all-zero "before" means the branch was created by this push; the
-          # head commit's own file list is then the right scope.
-          if [ -n "$BEFORE_SHA" ] \
-             && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
-             && CHANGED=$(gh api "repos/$REPO/compare/$BEFORE_SHA...$AFTER_SHA" --paginate \
-                          --jq '.files[] | select(.status != "removed") | .filename' 2>/dev/null); then
-            :
+          # head commit's own changes are then the right scope.
+          before="$BEFORE_SHA"
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then before=""; fi
+          if [ -n "$before" ] && ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            # The checkout dropped its credentials (persist-credentials: false),
+            # so pass the token to this one fetch the way the checkout action does.
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth=1 origin "$before" 2>/dev/null || before=""
+          fi
+          if [ -z "$before" ]; then
+            before="$(git rev-parse -q --verify "$AFTER_SHA^" || true)"
+          fi
+          if [ -n "$before" ]; then
+            CHANGED=$(git -c core.quotepath=false diff --name-only --diff-filter=d "$before" "$AFTER_SHA")
           else
-            CHANGED=$(gh api "repos/$REPO/commits/$AFTER_SHA" --paginate \
-                      --jq '.files[] | select(.status != "removed") | .filename')
+            CHANGED=$(git -c core.quotepath=false ls-files)
           fi
           # Artifact previews are served without a charset header; inject
           # <meta charset="utf-8"> into the uploaded copy when the file has no

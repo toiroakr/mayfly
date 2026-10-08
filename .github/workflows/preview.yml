@@ -23,32 +23,43 @@ jobs:
       contents: write   # post the commit comment
       actions: read     # list this run's artifacts (private repos enforce this)
     steps:
+      # Depth 2 holds the head commit's parent, which is the "before" of a push
+      # that adds one commit. A wider push fetches its "before" below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Collect changed HTML files
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          # Keep equal to the number of "Upload preview artifact" steps below.
           SLOTS: '10'
         run: |
           set -euo pipefail
-          # The changed-file list comes from the API. A branch created by a
-          # single push has an all-zero "before"; the head commit's own file
-          # list is then the right scope (diffing against the repo tree would
-          # preview every HTML file in the repo).
-          if [ -n "$BEFORE_SHA" ] \
-             && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
-             && CHANGED=$(gh api "repos/$REPO/compare/$BEFORE_SHA...$AFTER_SHA" --paginate \
-                          --jq '.files[] | select(.status != "removed") | .filename' 2>/dev/null); then
-            :
+          # git diff, not the compare API: that API stops listing files at 300,
+          # which would silently drop previews of the HTML files after them.
+          # A branch created by a single push has an all-zero "before"; the head
+          # commit's own changes are then the right scope (diffing against the
+          # repo tree would preview every HTML file in the repo).
+          before="$BEFORE_SHA"
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then before=""; fi
+          if [ -n "$before" ] && ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            # The checkout dropped its credentials (persist-credentials: false),
+            # so pass the token to this one fetch the way the checkout action does.
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth=1 origin "$before" 2>/dev/null || before=""
+          fi
+          if [ -z "$before" ]; then
+            before="$(git rev-parse -q --verify "$AFTER_SHA^" || true)"
+          fi
+          if [ -n "$before" ]; then
+            CHANGED=$(git -c core.quotepath=false diff --name-only --diff-filter=d "$before" "$AFTER_SHA")
           else
-            CHANGED=$(gh api "repos/$REPO/commits/$AFTER_SHA" --paginate \
-                      --jq '.files[] | select(.status != "removed") | .filename')
+            CHANGED=$(git -c core.quotepath=false ls-files)
           fi
 
           # Artifact previews are served without a charset in the Content-Type
