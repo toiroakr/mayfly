@@ -192,7 +192,10 @@ publish() {
   for i in "${!DESTLIST[@]}"; do
     (
       { printf '{"encoding":"base64","content":"'; base64 < "${SRCLIST[$i]}" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.$i.json"
-      gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.$i.json" -q .sha > "$TMPD/blob.$i.sha" 2>/dev/null
+      for _ in 1 2 3; do
+        gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.$i.json" -q .sha > "$TMPD/blob.$i.sha" 2> "$TMPD/blob.$i.err" && break
+        sleep 1
+      done
     ) &
     [ $(( (i + 1) % 8 )) -eq 0 ] && wait
   done
@@ -203,7 +206,7 @@ publish() {
   local TREE_ENTRIES="" blob
   for i in "${!DESTLIST[@]}"; do
     blob="$(cat "$TMPD/blob.$i.sha" 2>/dev/null || true)"
-    [ -n "$blob" ] || { echo "$PROG: failed to upload ${SRCLIST[$i]}" >&2; exit 1; }
+    [ -n "$blob" ] || { echo "$PROG: failed to upload ${SRCLIST[$i]}: $(cat "$TMPD/blob.$i.err" 2>/dev/null)" >&2; exit 1; }
     TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"${DESTLIST[$i]}\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
   done
 
