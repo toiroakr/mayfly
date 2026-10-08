@@ -546,69 +546,127 @@ permissions:
   contents: read
 
 jobs:
-  detect:
+  # A single job lists the changed files and uploads each one: every extra job
+  # costs several seconds of runner start-up and hand-off. A non-zipped artifact
+  # (`archive: false`) holds one file per upload step, so the upload steps are a
+  # fixed set of 10 slots; further files in the same push are skipped with a
+  # warning.
+  preview:
     runs-on: ubuntu-latest
-    outputs:
-      files: ${{ steps.collect.outputs.files }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - id: collect
+      - id: prepare
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          SLOTS: '10'
         run: |
           set -euo pipefail
-          if [ -z "$BEFORE_SHA" ] \
-             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
-            CHANGED=$(git ls-files '*.html')
+          # An all-zero "before" means the branch was created by this push; the
+          # head commit's own file list is then the right scope.
+          if [ -n "$BEFORE_SHA" ] \
+             && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+             && CHANGED=$(gh api "repos/$REPO/compare/$BEFORE_SHA...$AFTER_SHA" --paginate \
+                          --jq '.files[] | select(.status != "removed") | .filename' 2>/dev/null); then
+            :
           else
-            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
+            CHANGED=$(gh api "repos/$REPO/commits/$AFTER_SHA" --paginate \
+                      --jq '.files[] | select(.status != "removed") | .filename')
           fi
-          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
-            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
-          done)
-          FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-
-  upload:
-    needs: detect
-    if: needs.detect.outputs.files != '[]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        file: ${{ fromJSON(needs.detect.outputs.files) }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - id: name
-        env:
-          FILE: ${{ matrix.file }}
-        run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
-      # Artifact previews are served without a charset header; inject
-      # <meta charset="utf-8"> into the uploaded copy when the file has no
-      # declaration in its first 1024 bytes.
-      - name: Ensure charset declaration
-        env:
-          FILE: ${{ matrix.file }}
-        run: |
-          set -euo pipefail
-          if ! head -c 1024 "$FILE" | grep -qi 'charset='; then
-            perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
-                               or s/\A/<meta charset="utf-8">\n/' "$FILE"
-            echo "mayfly: injected <meta charset=\"utf-8\"> into $FILE"
+          # Artifact previews are served without a charset header; inject
+          # <meta charset="utf-8"> into the uploaded copy when the file has no
+          # declaration in its first 1024 bytes.
+          n=0
+          skipped=0
+          while IFS= read -r f; do
+            case "$f" in *.html) ;; *) continue;; esac
+            [ -f "$f" ] || continue
+            if [ "$n" -ge "$SLOTS" ]; then skipped=$((skipped + 1)); continue; fi
+            if ! head -c 1024 "$f" | grep -qi 'charset='; then
+              perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
+                                 or s/\A/<meta charset="utf-8">\n/' "$f"
+              echo "mayfly: injected <meta charset=\"utf-8\"> into $f"
+            fi
+            echo "path$n=$f" >> "$GITHUB_OUTPUT"
+            echo "name$n=$(printf '%s' "$f" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+            n=$((n + 1))
+          done <<< "$CHANGED"
+          echo "uploading $n file(s)"
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::$skipped HTML file(s) skipped: a push previews at most $SLOTS files. Push the rest separately."
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path0 != ''
         with:
-          name: ${{ steps.name.outputs.name }}
-          path: ${{ matrix.file }}
+          name: ${{ steps.prepare.outputs.name0 }}
+          path: ${{ steps.prepare.outputs.path0 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path1 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name1 }}
+          path: ${{ steps.prepare.outputs.path1 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path2 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name2 }}
+          path: ${{ steps.prepare.outputs.path2 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path3 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name3 }}
+          path: ${{ steps.prepare.outputs.path3 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path4 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name4 }}
+          path: ${{ steps.prepare.outputs.path4 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path5 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name5 }}
+          path: ${{ steps.prepare.outputs.path5 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path6 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name6 }}
+          path: ${{ steps.prepare.outputs.path6 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path7 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name7 }}
+          path: ${{ steps.prepare.outputs.path7 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path8 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name8 }}
+          path: ${{ steps.prepare.outputs.path8 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path9 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name9 }}
+          path: ${{ steps.prepare.outputs.path9 }}
           if-no-files-found: error
           archive: false
 PREVIEW_YML
@@ -691,42 +749,83 @@ REPO="${REPO_ARG:-${MAYFLY_REPO:-}}"
 [ -n "$REPO" ] || die "cannot determine repo; run inside the repo or set MAYFLY_REPO"
 : "${MESSAGE:=mayfly: preview for PR #$PR}"
 
-DEF="$(gh api "repos/$REPO" -q .default_branch)"
-BASE="$(gh api "repos/$REPO/git/ref/heads/$DEF" -q .object.sha)"
-BRANCH="$PREFIX$(date +%Y%m%d-%H%M%S)-$RANDOM"
-gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" >/dev/null
-BASE_TREE="$(gh api "repos/$REPO/git/commits/$BASE" -q .tree.sha)"
-
 TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
-ENTRIES=""; USED=""; DESTS=()
+for f in "${FILES[@]}"; do [ -f "$f" ] || die "file not found: $f"; done
+
+# Pick destination names first, then upload blobs in the background while one
+# GraphQL query fetches the default branch's commit and tree.
+USED=""; DESTS=(); SRCS=()
 for f in "${FILES[@]}"; do
-  [ -f "$f" ] || die "file not found: $f"
   b="$(basename "$f")"; stem="$b"; ext=""
   case "$b" in *.*) stem="${b%.*}"; ext=".${b##*.}";; esac
   d="$b"; n=1
   while case " $USED " in *" $d "*) true;; *) false;; esac; do n=$((n + 1)); d="$stem-$n$ext"; done
-  USED="$USED $d"; DESTS+=("$d")
-  { printf '{"encoding":"base64","content":"'; base64 < "$f" | tr -d '\n'; printf '"}'; } > "$TMPD/b.json"
-  sha="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/b.json" -q .sha)"
-  ENTRIES="${ENTRIES:+$ENTRIES,}{\"path\":\"$d\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"}"
+  USED="$USED $d"; DESTS+=("$d"); SRCS+=("$f")
+done
+for i in "${!DESTS[@]}"; do
+  (
+    { printf '{"encoding":"base64","content":"'; base64 < "${SRCS[$i]}" | tr -d '\n'; printf '"}'; } > "$TMPD/b$i.json"
+    for _ in 1 2 3; do
+      gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/b$i.json" -q .sha > "$TMPD/b$i.sha" 2> "$TMPD/b$i.err" && break
+      sleep 1
+    done
+  ) &
+  [ $(( (i + 1) % 8 )) -eq 0 ] && wait
+done
+ROW="$(gh api graphql \
+  -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid ... on Commit{tree{oid}}}}}}' \
+  -f owner="${REPO%%/*}" -f name="${REPO#*/}" \
+  --jq '.data.repository.defaultBranchRef.target | [.oid, .tree.oid] | join("|")')" || die "cannot read '$REPO'"
+IFS='|' read -r BASE BASE_TREE <<<"$ROW"
+[ -n "$BASE" ] || die "'$REPO' has no default branch to build on"
+wait
+
+# Create the branch at the default branch's commit while the tree and commit are
+# built, then move it. (Creating it at the new commit would give the push an
+# all-zero "before".)
+BRANCH="$PREFIX$(date +%Y%m%d-%H%M%S)-$RANDOM"
+gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" >/dev/null &
+BRANCH_PID=$!
+ENTRIES=""
+for i in "${!DESTS[@]}"; do
+  sha="$(cat "$TMPD/b$i.sha" 2>/dev/null || true)"
+  [ -n "$sha" ] || die "failed to upload ${SRCS[$i]}: $(cat "$TMPD/b$i.err" 2>/dev/null)"
+  ENTRIES="${ENTRIES:+$ENTRIES,}{\"path\":\"${DESTS[$i]}\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"}"
 done
 printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$ENTRIES" > "$TMPD/t.json"
 TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/t.json" -q .sha)"
 COMMIT="$(gh api -X POST "repos/$REPO/git/commits" -f message="$MESSAGE" -f tree="$TREE" -f "parents[]=$BASE" -q .sha)"
+wait "$BRANCH_PID" || die "could not create branch $BRANCH"
 gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$COMMIT" >/dev/null
 echo "$PROG: pushed ${#DESTS[@]} file(s) to $BRANCH" >&2
 
 RID=""
-echo -n "$PROG: waiting for run" >&2
-for i in $(seq 1 40); do
+echo "$PROG: waiting for run" >&2
+for i in $(seq 1 120); do
   RID="$(gh api "repos/$REPO/actions/runs?head_sha=$COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
-  [ -n "$RID" ] && break; echo -n "." >&2; sleep 3
+  [ -n "$RID" ] && break; sleep 1
 done
-echo >&2
 [ -n "$RID" ] || die "timed out finding workflow run (is mayfly-preview.yml pushed?)"
 echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RID" >&2
-gh run watch "$RID" -R "$REPO" --interval 2 --exit-status 1>&2 || echo "$PROG: warning: run did not complete cleanly" >&2
-ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+
+# Return as soon as every artifact is listed; the run's own teardown is not
+# needed for the URLs. Run status is checked every third tick so a run that
+# ends without them is still reported.
+ARTS=""
+for i in $(seq 1 900); do
+  ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+  MISSING=0
+  for d in "${DESTS[@]}"; do
+    printf '%s\n' "$ARTS" | awk -F'\t' -v n="$d" '$1==n{f=1} END{exit !f}' || MISSING=1
+  done
+  [ "$MISSING" -eq 0 ] && break
+  if [ $((i % 3)) -eq 1 ] && [ "$(gh api "repos/$REPO/actions/runs/$RID" -q .status 2>/dev/null)" = "completed" ]; then
+    ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    echo "$PROG: warning: the run ended without every preview; some URLs are missing" >&2
+    break
+  fi
+  sleep 1
+done
 
 PREVIEW="$TMPD/preview.md"
 {
