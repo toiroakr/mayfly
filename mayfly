@@ -134,21 +134,40 @@ find_run() {
   return 1
 }
 
-# Poll (1s) until the run completes, logging only status changes to stderr.
-# `gh run watch` redraws the whole job tree on every tick, which floods a
-# non-tty stderr. Returns non-zero if the run did not succeed.
-watch_run() {
-  local repo="$1" id="$2" row seen="" status conclusion i
+# Poll (1s) until every artifact in <name>... is listed on the run, then return
+# without waiting for the run itself to finish: whatever follows the uploads
+# (the commit comment, job teardown) is not needed for the URLs. Sets ART_LIST
+# ("name<TAB>id" lines). If the run ends first, returns non-zero with whatever
+# was uploaded. Run status is checked every third tick and logged once per state
+# (it flips between queued and in_progress as jobs hand off), because `gh run
+# watch` redraws the whole job tree on every tick and floods a non-tty stderr.
+await_artifacts() {
+  local repo="$1" id="$2"; shift 2
+  local i name row seen="" status conclusion missing
+  _missing() {
+    missing=0
+    for name in "$@"; do
+      printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$name" '$1==n{f=1} END{exit !f}' || missing=1
+    done
+  }
+  ART_LIST=""
   for i in $(seq 1 900); do
-    row="$(gh api "repos/$repo/actions/runs/$id" -q '"\(.status) \(.conclusion // "")"')" || row=""
-    status="${row%% *}"; conclusion="${row#* }"
-    # The status flips between queued and in_progress as each job hands off to
-    # the next, so announce each state once rather than on every change.
-    case "|$seen|" in
-      *"|$status|"*) ;;
-      *) [ -n "$status" ] && { echo "$PROG: run $status${conclusion:+ ($conclusion)}" >&2; seen="$seen|$status"; };;
-    esac
-    if [ "$status" = "completed" ]; then [ "$conclusion" = "success" ]; return; fi
+    ART_LIST="$(gh api "repos/$repo/actions/runs/$id/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    _missing "$@"
+    [ "$missing" -eq 0 ] && return 0
+    if [ $((i % 3)) -eq 1 ]; then
+      row="$(gh api "repos/$repo/actions/runs/$id" -q '"\(.status) \(.conclusion // "")"' 2>/dev/null || true)"
+      status="${row%% *}"; conclusion="${row#* }"
+      case "|$seen|" in
+        *"|$status|"*) ;;
+        *) [ -n "$status" ] && { echo "$PROG: run $status${conclusion:+ ($conclusion)}" >&2; seen="$seen|$status"; };;
+      esac
+      if [ "$status" = "completed" ]; then
+        ART_LIST="$(gh api "repos/$repo/actions/runs/$id/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+        _missing "$@"
+        return "$missing"
+      fi
+    fi
     sleep 1
   done
   return 1
@@ -240,9 +259,8 @@ publish() {
     echo "$PROG: waiting for the workflow to start" >&2
     RUN_ID="$(find_run "$REPO" "$NEW_COMMIT")" || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
     echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RUN_ID" >&2
-    watch_run "$REPO" "$RUN_ID" || \
-      echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
-    ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    await_artifacts "$REPO" "$RUN_ID" "${DESTLIST[@]}" || \
+      echo "$PROG: warning: the run ended without every preview; some URLs are missing" >&2
   fi
 
   local FILES_JSON="" i dest src id url urljson entry
