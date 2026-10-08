@@ -19,29 +19,30 @@ jobs:
     outputs:
       files: ${{ steps.collect.outputs.files }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
+      # No checkout: the changed-file list comes from the API, which saves the
+      # clone and keeps this job to a few seconds.
       - name: Collect changed HTML files
         id: collect
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ -z "$BEFORE_SHA" ] \
-             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
-            CHANGED=$(git ls-files '*.html')
+          # A branch created by a single push has an all-zero "before"; the head
+          # commit's own file list is then the right scope (diffing against the
+          # repo tree would preview every HTML file in the repo).
+          if [ -n "$BEFORE_SHA" ] \
+             && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+             && CHANGED=$(gh api "repos/$REPO/compare/$BEFORE_SHA...$AFTER_SHA" --paginate \
+                          --jq '.files[] | select(.status != "removed") | .filename' 2>/dev/null); then
+            :
           else
-            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
+            CHANGED=$(gh api "repos/$REPO/commits/$AFTER_SHA" --paginate \
+                      --jq '.files[] | select(.status != "removed") | .filename')
           fi
-          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
-            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
-          done)
-          FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
+          FILES=$(printf '%s\n' "$CHANGED" | { grep -E '\.html$' || true; } | jq -R . | jq -c -s .)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "changed: $FILES"
 
@@ -92,7 +93,9 @@ jobs:
 
   comment:
     needs: [detect, upload]
-    if: needs.detect.outputs.files != '[]'
+    # `mayfly push` branches (preview/*) already get their URLs from the CLI, so
+    # skip the extra runner start-up; direct pushes elsewhere still get a comment.
+    if: needs.detect.outputs.files != '[]' && !startsWith(github.ref_name, 'preview/')
     runs-on: ubuntu-latest
     permissions:
       contents: write   # post the commit comment
