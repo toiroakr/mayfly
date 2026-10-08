@@ -17,7 +17,7 @@ git add .github &amp;&amp; git commit -m "Add mayfly previews" &amp;&amp; git pu
     <h2>What it scaffolds</h2>
     <table>
       <tr><th>File</th><th>Role</th></tr>
-      <tr><td><code>.github/workflows/mayfly-preview.yml</code></td><td>On push to <code>mayfly/*</code> branches, upload each HTML as an artifact</td></tr>
+      <tr><td><code>.github/workflows/mayfly-preview.yml</code></td><td>On push to <code>mayfly/*</code> branches, upload each HTML as an artifact (up to 10 per push)</td></tr>
       <tr><td><code>.github/workflows/mayfly-cleanup.yml</code></td><td>Delete <code>mayfly/*</code> branches idle for 90 days</td></tr>
       <tr><td><code>.github/mayfly-preview</code></td><td>A <strong>separate</strong>, repo-local CLI (not the full <code>mayfly</code>)</td></tr>
     </table>
