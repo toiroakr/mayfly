@@ -12,7 +12,7 @@
     <p class="muted">The repo ships five GitHub Actions workflows. All are hand-written, pin actions by commit SHA, use <code>persist-credentials: false</code>, and request least-privilege permissions.</p>
     <table>
       <tr><th>Workflow</th><th>Trigger</th><th>Does</th></tr>
-      <tr><td><code>preview.yml</code></td><td>push of <code>**.html</code> (excl. <code>docs/**</code>)</td><td>detect changed HTML → upload each as an artifact → comment the URLs on the commit</td></tr>
+      <tr><td><code>preview.yml</code></td><td>push of <code>**.html</code> (excl. <code>docs/**</code>)</td><td>list changed HTML → upload each as an artifact (up to 10 per push) → comment the URLs on the commit (skipped on <code>preview/*</code> branches, where the CLI prints them)</td></tr>
       <tr><td><code>keep-preview.yml</code></td><td>PR touching <code>docs/**.html</code></td><td>build a preview of the kept page and comment it on the PR before merge</td></tr>
       <tr><td><code>pages.yml</code></td><td>push to default branch under <code>docs/**</code></td><td>generate <code>pages.json</code> (the doc index) and publish <code>docs/</code> to GitHub Pages</td></tr>
       <tr><td><code>cleanup.yml</code></td><td>daily schedule</td><td>delete <code>preview/*</code> branches idle for 90 days (default branch untouched)</td></tr>

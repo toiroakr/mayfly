@@ -87,27 +87,30 @@ open_url() {
 
 gen_branch() { printf '%s%s-%s' "$PREVIEW_PREFIX" "$(date +%Y%m%d-%H%M%S)" "$RANDOM"; }
 
-ensure_branch() {
-  local repo="$1" branch="$2" head def base
-  if head="$(gh api "repos/$repo/git/ref/heads/$branch" -q .object.sha 2>/dev/null)"; then
-    printf '%s' "$head"; return
-  fi
-  def="$(gh api "repos/$repo" -q .default_branch)"
-  base="$(gh api "repos/$repo/git/ref/heads/$def" -q .object.sha)"
-  gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
-  echo "$PROG: created branch '$branch'" >&2
-  printf '%s' "$base"
-}
-
 FIRST_URL=""
+
+# Everything publish needs to know about the repo, in one GraphQL round trip
+# (a REST version needed ~6 sequential calls): the default branch's commit and
+# tree, the target branch's commit and tree if it already exists, and whether
+# the preview workflow is present. Sets DEF_SHA DEF_TREE BR_SHA BR_TREE WF_OID.
+repo_state() {
+  local repo="$1" branch="$2" row
+  row="$(gh api graphql \
+    -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid ... on Commit{tree{oid}}}} ref(qualifiedName:$ref){target{oid ... on Commit{tree{oid}}}} wf:object(expression:"HEAD:.github/workflows/preview.yml"){oid}}}' \
+    -f owner="${repo%%/*}" -f name="${repo#*/}" -f ref="refs/heads/$branch" \
+    --jq '.data.repository | [.defaultBranchRef.target.oid, .defaultBranchRef.target.tree.oid, (.ref.target.oid // ""), (.ref.target.tree.oid // ""), (.wf.oid // "")] | join("|")')" \
+    || { echo "$PROG: cannot read '$repo' (does it exist, and can you access it?)" >&2; exit 1; }
+  IFS='|' read -r DEF_SHA DEF_TREE BR_SHA BR_TREE WF_OID <<<"$row"
+  [ -n "${DEF_SHA:-}" ] || { echo "$PROG: '$repo' has no default branch to build on" >&2; exit 1; }
+}
 
 # `push` only yields a preview if the target repo has the push-triggered preview
 # workflow (.github/workflows/preview.yml). Without it the commit just sits on a
 # dead branch and the run-watch loop times out 2 minutes later. Detect that
-# up front, before committing anything, and explain how to fix it.
+# before committing anything, and explain how to fix it.
 assert_push_capable() {
   local repo="$1"
-  gh api "repos/$repo/contents/.github/workflows/preview.yml" -q .name >/dev/null 2>&1 && return 0
+  [ -n "${WF_OID:-}" ] && return 0
   cat >&2 <<EOF
 $PROG: '$repo' is not a mayfly repo — no .github/workflows/preview.yml.
 $PROG: 'push' relies on that workflow to turn the commit into a browser-viewable
@@ -120,28 +123,74 @@ EOF
   exit 1
 }
 
+# Poll (1s) until the push-triggered run for <sha> exists; prints its id.
+find_run() {
+  local repo="$1" sha="$2" i id=""
+  for i in $(seq 1 120); do
+    id="$(gh api "repos/$repo/actions/runs?head_sha=$sha&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
+    [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+    sleep 1
+  done
+  return 1
+}
+
+# Poll (1s) until every artifact in <name>... is listed on the run, then return
+# without waiting for the run itself to finish: whatever follows the uploads
+# (the commit comment, job teardown) is not needed for the URLs. Sets ART_LIST
+# ("name<TAB>id" lines). If the run ends first, returns non-zero with whatever
+# was uploaded. Run status is checked every third tick and logged once per state
+# (it flips between queued and in_progress as jobs hand off), because `gh run
+# watch` redraws the whole job tree on every tick and floods a non-tty stderr.
+await_artifacts() {
+  local repo="$1" id="$2"; shift 2
+  local i name row seen="" status conclusion missing
+  _missing() {
+    missing=0
+    for name in "$@"; do
+      printf '%s\n' "$ART_LIST" | awk -F'\t' -v n="$name" '$1==n{f=1} END{exit !f}' || missing=1
+    done
+  }
+  ART_LIST=""
+  for i in $(seq 1 900); do
+    ART_LIST="$(gh api "repos/$repo/actions/runs/$id/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    _missing "$@"
+    [ "$missing" -eq 0 ] && return 0
+    if [ $((i % 3)) -eq 1 ]; then
+      row="$(gh api "repos/$repo/actions/runs/$id" -q '"\(.status) \(.conclusion // "")"' 2>/dev/null || true)"
+      status="${row%% *}"; conclusion="${row#* }"
+      case "|$seen|" in
+        *"|$status|"*) ;;
+        *) [ -n "$status" ] && { echo "$PROG: run $status${conclusion:+ ($conclusion)}" >&2; seen="$seen|$status"; };;
+      esac
+      if [ "$status" = "completed" ]; then
+        ART_LIST="$(gh api "repos/$repo/actions/runs/$id/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+        _missing "$@"
+        return "$missing"
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # publish <repo> <branch> <message> <file>...  (files committed at basename, root)
 publish() {
   local REPO="$1" BRANCH="$2" MESSAGE="$3"; shift 3
   FIRST_URL=""
-  assert_push_capable "$REPO"
-  # Validate inputs before creating a branch, so a typo'd path can't leave a
+  # Validate inputs before touching the repo, so a typo'd path can't leave a
   # stray empty branch behind.
   local path
   for path in "$@"; do
     [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
   done
 
-  local HEAD_SHA BASE_TREE
-  HEAD_SHA="$(ensure_branch "$REPO" "$BRANCH")"
-  BASE_TREE="$(gh api "repos/$REPO/git/commits/$HEAD_SHA" -q .tree.sha)"
-
   TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
 
-  local TREE_ENTRIES="" USED="" path base dest stem ext n blob
+  # Pick destination names first (cheap, local) so blob uploads can start right
+  # away and overlap with the repo-state query below.
+  local USED="" base dest stem ext n i=0
   local DESTLIST=() SRCLIST=()
   for path in "$@"; do
-    [ -f "$path" ] || { echo "$PROG: file not found: $path" >&2; exit 1; }
     base="$(basename "$path")"
     # A non-zipped artifact is keyed by its file basename, so basenames must be
     # unique. Rather than reject collisions, rename "<stem>.<ext>" to
@@ -153,37 +202,65 @@ publish() {
       n=$((n + 1)); dest="$stem-$n$ext"
     done
     USED="$USED $dest"; DESTLIST+=("$dest"); SRCLIST+=("$path")
-    { printf '{"encoding":"base64","content":"'; base64 < "$path" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.json"
-    blob="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.json" -q .sha)"
-    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"$dest\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
-    if [ "$dest" = "$base" ]; then echo "$PROG: staged $dest" >&2; else echo "$PROG: staged $dest (renamed from $base)" >&2; fi
+    if [ "$dest" = "$base" ]; then echo "$PROG: staging $dest" >&2; else echo "$PROG: staging $dest (renamed from $base)" >&2; fi
   done
 
+  # Blob uploads run in the background, a few at a time; the repo-state query
+  # runs alongside them. Blobs are unreachable until a tree references them, so
+  # uploading before the mayfly-repo check below leaves nothing visible behind.
+  for i in "${!DESTLIST[@]}"; do
+    (
+      { printf '{"encoding":"base64","content":"'; base64 < "${SRCLIST[$i]}" | tr -d '\n'; printf '"}'; } > "$TMPD/blob.$i.json"
+      for _ in 1 2 3; do
+        gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/blob.$i.json" -q .sha > "$TMPD/blob.$i.sha" 2> "$TMPD/blob.$i.err" && break
+        sleep 1
+      done
+    ) &
+    [ $(( (i + 1) % 8 )) -eq 0 ] && wait
+  done
+  repo_state "$REPO" "$BRANCH"
+  wait
+  assert_push_capable "$REPO"
+
+  local TREE_ENTRIES="" blob
+  for i in "${!DESTLIST[@]}"; do
+    blob="$(cat "$TMPD/blob.$i.sha" 2>/dev/null || true)"
+    [ -n "$blob" ] || { echo "$PROG: failed to upload ${SRCLIST[$i]}: $(cat "$TMPD/blob.$i.err" 2>/dev/null)" >&2; exit 1; }
+    TREE_ENTRIES="${TREE_ENTRIES:+$TREE_ENTRIES,}{\"path\":\"${DESTLIST[$i]}\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$blob\"}"
+  done
+
+  # Existing branch: commit on top of it. New branch: create it at the default
+  # branch's commit, then move it. (Creating it directly at the new commit would
+  # make the push's "before" all-zero, which older copies of the preview
+  # workflow answer by previewing every HTML file in the repo.) Branch creation
+  # doesn't depend on the tree, so it overlaps with tree/commit creation.
+  local PARENT BASE_TREE BRANCH_PID="" EXISTS=1
+  if [ -n "$BR_SHA" ]; then PARENT="$BR_SHA"; BASE_TREE="$BR_TREE"
+  else
+    PARENT="$DEF_SHA"; BASE_TREE="$DEF_TREE"; EXISTS=0
+    gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$PARENT" >/dev/null &
+    BRANCH_PID=$!
+  fi
+
   printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$TREE_ENTRIES" > "$TMPD/tree.json"
-  local NEW_TREE NEW_COMMIT RUN_ID="" i ART_LIST=""
+  local NEW_TREE NEW_COMMIT RUN_ID="" ART_LIST=""
   NEW_TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/tree.json" -q .sha)"
 
   if [ "$NEW_TREE" = "$BASE_TREE" ]; then
+    [ "$EXISTS" -eq 1 ] || wait "$BRANCH_PID"
     echo "$PROG: no changes to publish on $BRANCH (already up to date)" >&2
   else
     NEW_COMMIT="$(gh api -X POST "repos/$REPO/git/commits" \
-      -f message="$MESSAGE" -f tree="$NEW_TREE" -f "parents[]=$HEAD_SHA" -q .sha)"
+      -f message="$MESSAGE" -f tree="$NEW_TREE" -f "parents[]=$PARENT" -q .sha)"
+    [ "$EXISTS" -eq 1 ] || { wait "$BRANCH_PID"; echo "$PROG: created branch '$BRANCH'" >&2; }
     gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$NEW_COMMIT" >/dev/null
     echo "$PROG: committed ${#DESTLIST[@]} file(s) to $REPO@$BRANCH ($NEW_COMMIT)" >&2
 
-    echo -n "$PROG: waiting for the workflow to start" >&2
-    for i in $(seq 1 40); do
-      RUN_ID="$(gh api "repos/$REPO/actions/runs?head_sha=$NEW_COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
-      [ -n "$RUN_ID" ] && break
-      echo -n "." >&2; sleep 3
-    done
-    echo >&2
-    [ -n "$RUN_ID" ] || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
-    # Live job/step progress to stderr (stdout stays JSON-only).
+    echo "$PROG: waiting for the workflow to start" >&2
+    RUN_ID="$(find_run "$REPO" "$NEW_COMMIT")" || { echo "$PROG: timed out finding workflow run" >&2; exit 1; }
     echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RUN_ID" >&2
-    gh run watch "$RUN_ID" -R "$REPO" --interval 2 --exit-status 1>&2 || \
-      echo "$PROG: warning: run did not complete cleanly; URLs may be missing" >&2
-    ART_LIST="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    await_artifacts "$REPO" "$RUN_ID" "${DESTLIST[@]}" || \
+      echo "$PROG: warning: the run ended without every preview; some URLs are missing" >&2
   fi
 
   local FILES_JSON="" i dest src id url urljson entry
@@ -469,69 +546,139 @@ permissions:
   contents: read
 
 jobs:
-  detect:
+  # A single job lists the changed files and uploads each one: every extra job
+  # costs several seconds of runner start-up and hand-off. A non-zipped artifact
+  # (`archive: false`) holds one file per upload step, so the upload steps are a
+  # fixed set of 10 slots; further files in the same push are skipped with a
+  # warning.
+  preview:
     runs-on: ubuntu-latest
-    outputs:
-      files: ${{ steps.collect.outputs.files }}
     steps:
+      # Depth 2 holds the head commit's parent, which is the "before" of a push
+      # that adds one commit. A wider push fetches its "before" below.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
-      - id: collect
+      - id: prepare
         env:
+          GH_TOKEN: ${{ github.token }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
+          # Keep equal to the number of upload steps below.
+          SLOTS: '10'
         run: |
           set -euo pipefail
-          if [ -z "$BEFORE_SHA" ] \
-             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
-            CHANGED=$(git ls-files '*.html')
-          else
-            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
+          # git diff, not the compare API: that API stops listing files at 300,
+          # which would silently drop previews of the HTML files after them.
+          # An all-zero "before" means the branch was created by this push; the
+          # head commit's own changes are then the right scope.
+          before="$BEFORE_SHA"
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then before=""; fi
+          if [ -n "$before" ] && ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            # The checkout dropped its credentials (persist-credentials: false),
+            # so pass the token to this one fetch the way the checkout action does.
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth=1 origin "$before" 2>/dev/null || before=""
           fi
-          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
-            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
-          done)
-          FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-
-  upload:
-    needs: detect
-    if: needs.detect.outputs.files != '[]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        file: ${{ fromJSON(needs.detect.outputs.files) }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - id: name
-        env:
-          FILE: ${{ matrix.file }}
-        run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
-      # Artifact previews are served without a charset header; inject
-      # <meta charset="utf-8"> into the uploaded copy when the file has no
-      # declaration in its first 1024 bytes.
-      - name: Ensure charset declaration
-        env:
-          FILE: ${{ matrix.file }}
-        run: |
-          set -euo pipefail
-          if ! head -c 1024 "$FILE" | grep -qi 'charset='; then
-            perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
-                               or s/\A/<meta charset="utf-8">\n/' "$FILE"
-            echo "mayfly: injected <meta charset=\"utf-8\"> into $FILE"
+          if [ -z "$before" ]; then
+            before="$(git rev-parse -q --verify "$AFTER_SHA^" || true)"
+          fi
+          if [ -n "$before" ]; then
+            CHANGED=$(git -c core.quotepath=false diff --name-only --diff-filter=d "$before" "$AFTER_SHA")
+          else
+            CHANGED=$(git -c core.quotepath=false ls-files)
+          fi
+          # Artifact previews are served without a charset header; inject
+          # <meta charset="utf-8"> into the uploaded copy when the file has no
+          # declaration in its first 1024 bytes.
+          n=0
+          skipped=0
+          while IFS= read -r f; do
+            case "$f" in *.html) ;; *) continue;; esac
+            [ -f "$f" ] || continue
+            if [ "$n" -ge "$SLOTS" ]; then skipped=$((skipped + 1)); continue; fi
+            if ! head -c 1024 "$f" | grep -qi 'charset='; then
+              perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
+                                 or s/\A/<meta charset="utf-8">\n/' "$f"
+              echo "mayfly: injected <meta charset=\"utf-8\"> into $f"
+            fi
+            echo "path$n=$f" >> "$GITHUB_OUTPUT"
+            echo "name$n=$(printf '%s' "$f" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+            n=$((n + 1))
+          done <<< "$CHANGED"
+          echo "uploading $n file(s)"
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::$skipped HTML file(s) skipped: a push previews at most $SLOTS files. Push the rest separately."
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path0 != ''
         with:
-          name: ${{ steps.name.outputs.name }}
-          path: ${{ matrix.file }}
+          name: ${{ steps.prepare.outputs.name0 }}
+          path: ${{ steps.prepare.outputs.path0 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path1 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name1 }}
+          path: ${{ steps.prepare.outputs.path1 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path2 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name2 }}
+          path: ${{ steps.prepare.outputs.path2 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path3 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name3 }}
+          path: ${{ steps.prepare.outputs.path3 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path4 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name4 }}
+          path: ${{ steps.prepare.outputs.path4 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path5 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name5 }}
+          path: ${{ steps.prepare.outputs.path5 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path6 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name6 }}
+          path: ${{ steps.prepare.outputs.path6 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path7 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name7 }}
+          path: ${{ steps.prepare.outputs.path7 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path8 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name8 }}
+          path: ${{ steps.prepare.outputs.path8 }}
+          if-no-files-found: error
+          archive: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.prepare.outputs.path9 != ''
+        with:
+          name: ${{ steps.prepare.outputs.name9 }}
+          path: ${{ steps.prepare.outputs.path9 }}
           if-no-files-found: error
           archive: false
 PREVIEW_YML
@@ -614,42 +761,83 @@ REPO="${REPO_ARG:-${MAYFLY_REPO:-}}"
 [ -n "$REPO" ] || die "cannot determine repo; run inside the repo or set MAYFLY_REPO"
 : "${MESSAGE:=mayfly: preview for PR #$PR}"
 
-DEF="$(gh api "repos/$REPO" -q .default_branch)"
-BASE="$(gh api "repos/$REPO/git/ref/heads/$DEF" -q .object.sha)"
-BRANCH="$PREFIX$(date +%Y%m%d-%H%M%S)-$RANDOM"
-gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" >/dev/null
-BASE_TREE="$(gh api "repos/$REPO/git/commits/$BASE" -q .tree.sha)"
-
 TMPD="$(mktemp -d)"; trap 'rm -rf "${TMPD:-}"' EXIT
-ENTRIES=""; USED=""; DESTS=()
+for f in "${FILES[@]}"; do [ -f "$f" ] || die "file not found: $f"; done
+
+# Pick destination names first, then upload blobs in the background while one
+# GraphQL query fetches the default branch's commit and tree.
+USED=""; DESTS=(); SRCS=()
 for f in "${FILES[@]}"; do
-  [ -f "$f" ] || die "file not found: $f"
   b="$(basename "$f")"; stem="$b"; ext=""
   case "$b" in *.*) stem="${b%.*}"; ext=".${b##*.}";; esac
   d="$b"; n=1
   while case " $USED " in *" $d "*) true;; *) false;; esac; do n=$((n + 1)); d="$stem-$n$ext"; done
-  USED="$USED $d"; DESTS+=("$d")
-  { printf '{"encoding":"base64","content":"'; base64 < "$f" | tr -d '\n'; printf '"}'; } > "$TMPD/b.json"
-  sha="$(gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/b.json" -q .sha)"
-  ENTRIES="${ENTRIES:+$ENTRIES,}{\"path\":\"$d\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"}"
+  USED="$USED $d"; DESTS+=("$d"); SRCS+=("$f")
+done
+for i in "${!DESTS[@]}"; do
+  (
+    { printf '{"encoding":"base64","content":"'; base64 < "${SRCS[$i]}" | tr -d '\n'; printf '"}'; } > "$TMPD/b$i.json"
+    for _ in 1 2 3; do
+      gh api -X POST "repos/$REPO/git/blobs" --input "$TMPD/b$i.json" -q .sha > "$TMPD/b$i.sha" 2> "$TMPD/b$i.err" && break
+      sleep 1
+    done
+  ) &
+  [ $(( (i + 1) % 8 )) -eq 0 ] && wait
+done
+ROW="$(gh api graphql \
+  -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid ... on Commit{tree{oid}}}}}}' \
+  -f owner="${REPO%%/*}" -f name="${REPO#*/}" \
+  --jq '.data.repository.defaultBranchRef.target | [.oid, .tree.oid] | join("|")')" || die "cannot read '$REPO'"
+IFS='|' read -r BASE BASE_TREE <<<"$ROW"
+[ -n "$BASE" ] || die "'$REPO' has no default branch to build on"
+wait
+
+# Create the branch at the default branch's commit while the tree and commit are
+# built, then move it. (Creating it at the new commit would give the push an
+# all-zero "before".)
+BRANCH="$PREFIX$(date +%Y%m%d-%H%M%S)-$RANDOM"
+gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$BASE" >/dev/null &
+BRANCH_PID=$!
+ENTRIES=""
+for i in "${!DESTS[@]}"; do
+  sha="$(cat "$TMPD/b$i.sha" 2>/dev/null || true)"
+  [ -n "$sha" ] || die "failed to upload ${SRCS[$i]}: $(cat "$TMPD/b$i.err" 2>/dev/null)"
+  ENTRIES="${ENTRIES:+$ENTRIES,}{\"path\":\"${DESTS[$i]}\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"}"
 done
 printf '{"base_tree":"%s","tree":[%s]}' "$BASE_TREE" "$ENTRIES" > "$TMPD/t.json"
 TREE="$(gh api -X POST "repos/$REPO/git/trees" --input "$TMPD/t.json" -q .sha)"
 COMMIT="$(gh api -X POST "repos/$REPO/git/commits" -f message="$MESSAGE" -f tree="$TREE" -f "parents[]=$BASE" -q .sha)"
+wait "$BRANCH_PID" || die "could not create branch $BRANCH"
 gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$COMMIT" >/dev/null
 echo "$PROG: pushed ${#DESTS[@]} file(s) to $BRANCH" >&2
 
 RID=""
-echo -n "$PROG: waiting for run" >&2
-for i in $(seq 1 40); do
+echo "$PROG: waiting for run" >&2
+for i in $(seq 1 120); do
   RID="$(gh api "repos/$REPO/actions/runs?head_sha=$COMMIT&event=push&per_page=1" -q '.workflow_runs[0].id // empty')"
-  [ -n "$RID" ] && break; echo -n "." >&2; sleep 3
+  [ -n "$RID" ] && break; sleep 1
 done
-echo >&2
 [ -n "$RID" ] || die "timed out finding workflow run (is mayfly-preview.yml pushed?)"
 echo "$PROG: building preview — https://github.com/$REPO/actions/runs/$RID" >&2
-gh run watch "$RID" -R "$REPO" --interval 2 --exit-status 1>&2 || echo "$PROG: warning: run did not complete cleanly" >&2
-ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+
+# Return as soon as every artifact is listed; the run's own teardown is not
+# needed for the URLs. Run status is checked every third tick so a run that
+# ends without them is still reported.
+ARTS=""
+for i in $(seq 1 900); do
+  ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+  MISSING=0
+  for d in "${DESTS[@]}"; do
+    printf '%s\n' "$ARTS" | awk -F'\t' -v n="$d" '$1==n{f=1} END{exit !f}' || MISSING=1
+  done
+  [ "$MISSING" -eq 0 ] && break
+  if [ $((i % 3)) -eq 1 ] && [ "$(gh api "repos/$REPO/actions/runs/$RID" -q .status 2>/dev/null)" = "completed" ]; then
+    ARTS="$(gh api "repos/$REPO/actions/runs/$RID/artifacts" -q '.artifacts[] | "\(.name)\t\(.id)"' 2>/dev/null || true)"
+    echo "$PROG: warning: the run ended without every preview; some URLs are missing" >&2
+    break
+  fi
+  sleep 1
+done
 
 PREVIEW="$TMPD/preview.md"
 {

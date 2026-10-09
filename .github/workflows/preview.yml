@@ -14,91 +14,175 @@ permissions:
   contents: read
 
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      files: ${{ steps.collect.outputs.files }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Collect changed HTML files
-        id: collect
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "$BEFORE_SHA" ] \
-             || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
-            CHANGED=$(git ls-files '*.html')
-          else
-            CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- '*.html')
-          fi
-          CHANGED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
-            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f"
-          done)
-          FILES=$(printf '%s\n' "$CHANGED" | grep -v '^$' | jq -R . | jq -c -s .)
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "changed: $FILES"
-
-  upload:
-    needs: detect
-    if: needs.detect.outputs.files != '[]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        file: ${{ fromJSON(needs.detect.outputs.files) }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Compute artifact name
-        id: name
-        env:
-          FILE: ${{ matrix.file }}
-        run: echo "name=$(printf '%s' "$FILE" | tr '/' '_')" >> "$GITHUB_OUTPUT"
-
-      # Artifact previews are served without a charset in the Content-Type
-      # header, so a UTF-8 page with no in-file declaration renders as mojibake.
-      # Inject <meta charset="utf-8"> (after the doctype if present, else at the
-      # top — must land within the first 1024 bytes) before uploading. The
-      # committed file is left untouched; only the uploaded copy is patched.
-      - name: Ensure charset declaration
-        env:
-          FILE: ${{ matrix.file }}
-        run: |
-          set -euo pipefail
-          if ! head -c 1024 "$FILE" | grep -qi 'charset='; then
-            perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
-                               or s/\A/<meta charset="utf-8">\n/' "$FILE"
-            echo "mayfly: injected <meta charset=\"utf-8\"> into $FILE"
-          fi
-
-      - name: Upload preview artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ steps.name.outputs.name }}
-          path: ${{ matrix.file }}
-          if-no-files-found: error
-          archive: false
-
-  comment:
-    needs: [detect, upload]
-    if: needs.detect.outputs.files != '[]'
+  # A single job does everything: every extra job costs several seconds of
+  # runner start-up and hand-off. A non-zipped artifact (`archive: false`) holds
+  # one file per upload step, so the upload steps are a fixed set of slots.
+  preview:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # post the commit comment
-      actions: read      # list this run's artifacts (private repos enforce this)
+      actions: read     # list this run's artifacts (private repos enforce this)
     steps:
+      # Depth 2 holds the head commit's parent, which is the "before" of a push
+      # that adds one commit. A wider push fetches its "before" below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Collect changed HTML files
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          # Keep equal to the number of "Upload preview artifact" steps below.
+          SLOTS: '10'
+        run: |
+          set -euo pipefail
+          # git diff, not the compare API: that API stops listing files at 300,
+          # which would silently drop previews of the HTML files after them.
+          # A branch created by a single push has an all-zero "before"; the head
+          # commit's own changes are then the right scope (diffing against the
+          # repo tree would preview every HTML file in the repo).
+          before="$BEFORE_SHA"
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then before=""; fi
+          if [ -n "$before" ] && ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            # The checkout dropped its credentials (persist-credentials: false),
+            # so pass the token to this one fetch the way the checkout action does.
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags --depth=1 origin "$before" 2>/dev/null || before=""
+          fi
+          if [ -z "$before" ]; then
+            before="$(git rev-parse -q --verify "$AFTER_SHA^" || true)"
+          fi
+          if [ -n "$before" ]; then
+            CHANGED=$(git -c core.quotepath=false diff --name-only --diff-filter=d "$before" "$AFTER_SHA")
+          else
+            CHANGED=$(git -c core.quotepath=false ls-files)
+          fi
+
+          # Artifact previews are served without a charset in the Content-Type
+          # header, so a UTF-8 page with no in-file declaration renders as
+          # mojibake. Inject <meta charset="utf-8"> (after the doctype if
+          # present, else at the top — must land within the first 1024 bytes)
+          # before uploading. The committed file is left untouched; only the
+          # uploaded copy is patched.
+          n=0
+          skipped=0
+          while IFS= read -r f; do
+            case "$f" in *.html) ;; *) continue;; esac
+            [ -f "$f" ] || continue
+            if [ "$n" -ge "$SLOTS" ]; then skipped=$((skipped + 1)); continue; fi
+            if ! head -c 1024 "$f" | grep -qi 'charset='; then
+              perl -0777 -pi -e 's/\A(\s*<!doctype[^>]*>)/$1\n<meta charset="utf-8">/i
+                                 or s/\A/<meta charset="utf-8">\n/' "$f"
+              echo "mayfly: injected <meta charset=\"utf-8\"> into $f"
+            fi
+            echo "path$n=$f" >> "$GITHUB_OUTPUT"
+            echo "name$n=$(printf '%s' "$f" | tr '/' '_')" >> "$GITHUB_OUTPUT"
+            n=$((n + 1))
+          done <<< "$CHANGED"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "uploading $n file(s)"
+          if [ "$skipped" -gt 0 ]; then
+            echo "::warning::$skipped HTML file(s) skipped: a push previews at most $SLOTS files. Push the rest separately."
+          fi
+
+      - name: Upload preview artifact (1)
+        if: steps.prepare.outputs.path0 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name0 }}
+          path: ${{ steps.prepare.outputs.path0 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (2)
+        if: steps.prepare.outputs.path1 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name1 }}
+          path: ${{ steps.prepare.outputs.path1 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (3)
+        if: steps.prepare.outputs.path2 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name2 }}
+          path: ${{ steps.prepare.outputs.path2 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (4)
+        if: steps.prepare.outputs.path3 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name3 }}
+          path: ${{ steps.prepare.outputs.path3 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (5)
+        if: steps.prepare.outputs.path4 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name4 }}
+          path: ${{ steps.prepare.outputs.path4 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (6)
+        if: steps.prepare.outputs.path5 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name5 }}
+          path: ${{ steps.prepare.outputs.path5 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (7)
+        if: steps.prepare.outputs.path6 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name6 }}
+          path: ${{ steps.prepare.outputs.path6 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (8)
+        if: steps.prepare.outputs.path7 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name7 }}
+          path: ${{ steps.prepare.outputs.path7 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (9)
+        if: steps.prepare.outputs.path8 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name8 }}
+          path: ${{ steps.prepare.outputs.path8 }}
+          if-no-files-found: error
+          archive: false
+
+      - name: Upload preview artifact (10)
+        if: steps.prepare.outputs.path9 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.prepare.outputs.name9 }}
+          path: ${{ steps.prepare.outputs.path9 }}
+          if-no-files-found: error
+          archive: false
+
+      # `mayfly push` branches (preview/*) already get their URLs from the CLI,
+      # so skip the comment there; direct pushes elsewhere still get one.
       - name: Comment preview URLs on the commit
+        if: steps.prepare.outputs.count != '0' && !startsWith(github.ref_name, 'preview/')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
