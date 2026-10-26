@@ -8,13 +8,14 @@ name: Keep preview
 on:
   pull_request:
     paths:
-      - 'docs/**.html'
+      - "docs/**.html"
 
 permissions:
   contents: read
 
 jobs:
   detect:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     outputs:
       files: ${{ steps.collect.outputs.files }}
@@ -39,6 +40,7 @@ jobs:
           echo "changed: $FILES"
 
   upload:
+    timeout-minutes: 30
     needs: detect
     if: needs.detect.outputs.files != '[]'
     runs-on: ubuntu-latest
@@ -77,6 +79,7 @@ jobs:
           archive: false
 
   comment:
+    timeout-minutes: 30
     needs: [detect, upload]
     # Same-repo PRs only (fork tokens are read-only).
     if: >-
@@ -94,7 +97,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SERVER: ${{ github.server_url }}
-          MARKER: '<!-- mayfly-keep-preview -->'
+          MARKER: "<!-- mayfly-keep-preview -->"
         run: |
           set -euo pipefail
           ARTS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate \

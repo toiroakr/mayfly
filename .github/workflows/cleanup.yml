@@ -6,7 +6,7 @@ name: Cleanup stale branches
 
 on:
   schedule:
-    - cron: '0 0 * * *' # daily 00:00 UTC
+    - cron: "0 0 * * *" # daily 00:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -14,11 +14,12 @@ permissions:
 
 jobs:
   cleanup:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      STALE_DAYS: '90'
+      STALE_DAYS: "90"
     steps:
       - name: Delete stale preview/* branches
         run: |
